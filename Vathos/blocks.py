@@ -77,7 +77,9 @@ class MultiheadAttentionMixer(nn.Module):
 class CausalMultiheadAttentionMixer(nn.Module):
     def __init__(self, d_model: int, n_heads: int, causal=True):
         super().__init__()
-        assert causal, "CausalMultiheadAttentionMixer Module only supports causal=True, if you meant to create a non Causal Attention use the MultiheadAttentionMixer"
+        assert causal, \
+            ("CausalMultiheadAttentionMixer Module only supports causal=True, "
+             "if you meant to create a non Causal Attention use the MultiheadAttentionMixer")
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
