@@ -224,4 +224,4 @@ def test_causality(module=MTransformer(8, 4, 2)):
 
 
 if __name__ == "__main__":
-    test_causality(MTransformer)
+    test_causality(MTransformer(16, 4, 2))
