@@ -195,18 +195,12 @@ class _MTemplate(nn.Module):
         return self.norm(x)
 
 
-def test_causality(module=MTransformer):
+def test_causality(module=MTransformer(8, 4, 2)):
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    d_model = 256
-    n_layers = 4
-    n_heads = 8
-    batch_size = 2
-    seq_len = 16
-
-    model = module(d_model, n_layers, n_heads, causal=True).to(device)
-    x = torch.randn(batch_size, seq_len, d_model, device=device)
+    model = module
+    x = torch.randn(2, 20, model.d_model, device=device)
 
     print(f"\nInput shape: {x.shape}")
 
@@ -217,7 +211,7 @@ def test_causality(module=MTransformer):
     with torch.no_grad():
         full_output = model(x)
 
-        for t in range(1, seq_len):
+        for t in range(1, 20):
             prefix_output = model(x[:, :t, :])
 
             max_diff = (full_output[:, :t, :] - prefix_output).abs().max().item()
