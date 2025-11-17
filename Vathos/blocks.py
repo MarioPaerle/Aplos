@@ -193,7 +193,7 @@ class _MTemplate(nn.Module):
         return self.norm(x)
 
 
-if __name__ == "__main__":
+def test_causality(module=MTransformer):
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -203,10 +203,7 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 16
 
-    print(f"Testing on device: {device}")
-    print(f"Config: d_model={d_model}, n_layers={n_layers}, n_heads={n_heads}")
-
-    model = MTransformer(d_model, n_layers, n_heads, causal=True).to(device)
+    model = module(d_model, n_layers, n_heads, causal=True).to(device)
     x = torch.randn(batch_size, seq_len, d_model, device=device)
 
     print(f"\nInput shape: {x.shape}")
@@ -214,10 +211,6 @@ if __name__ == "__main__":
     with torch.no_grad():
         output = model(x)
 
-    print(f"Output shape: {output.shape}")
-    print(f"Output mean: {output.mean().item():.4f}, std: {output.std().item():.4f}")
-
-    print("\nTesting causality...")
     model.eval()
     with torch.no_grad():
         full_output = model(x)
@@ -228,10 +221,11 @@ if __name__ == "__main__":
             max_diff = (full_output[:, :t, :] - prefix_output).abs().max().item()
 
             if max_diff > 1e-5:
-                print(f"❌ Causality violated at position {t}: max_diff={max_diff:.6f}")
+                print(f"Causality violated")
                 break
         else:
-            print("✓ Causality verified: outputs are prefix-consistent")
+            print("Causality verified")
 
-    print("\nParameter count:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
-    print("Test complete!")
+
+if __name__ == "__main__":
+    test_causality(MTransformer)
