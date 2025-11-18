@@ -26,9 +26,9 @@ def power_weigthed_cumsum(x, a=0.999, rescale=True):
     if a - 1 == 0:
         return cumsum(x)
     if len(x.shape) == 3:
-        alpha_pow = torch.full([x.shape[1]], a, dtype=x.dtype).cumprod(dim=0).unsqueeze(0).unsqueeze(2)
+        alpha_pow = torch.full([x.shape[1]], a, dtype=x.dtype, device=x.device).cumprod(dim=0).unsqueeze(0).unsqueeze(2)
     elif len(x.shape) == 4:
-        alpha_pow = torch.full([x.shape[1]], a, dtype=x.dtype).cumprod(dim=0).unsqueeze(0).unsqueeze(2).unsqueeze(2)
+        alpha_pow = torch.full([x.shape[1]], a, dtype=x.dtype, device=x.device).cumprod(dim=0).unsqueeze(0).unsqueeze(2).unsqueeze(2)
     else:
         raise RuntimeError("x shapes mus be of form [B, L, d] or [B, L, d, d]")
 
