@@ -159,6 +159,40 @@ class MLP(nn.Module):
         return self.layers(x)
 
 
+class ResMLP(nn.Module):
+    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
+        super().__init__()
+        hidden_dim = d_model * expand
+
+        layers = []
+        for i in range(depth):
+            if i == 0:
+                in_dim = d_model
+                out_dim = hidden_dim
+            elif i == depth - 1:
+                in_dim = hidden_dim
+                out_dim = d_model
+            else:
+                in_dim = hidden_dim
+                out_dim = hidden_dim
+
+            if isinstance(activation, SwiGLU) and i < depth - 1:
+                out_dim = out_dim * 2
+
+            layers.append(nn.Linear(in_dim, out_dim, bias=True))
+            if i < depth - 1:
+                layers.append(activation)
+
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x: torch.Tensor):
+        for i, layer in enumerate(self.layers):
+            if i % 3 == 0:
+                x = x + layer(x)
+            else:
+                x = layer(x)
+
+
 class Block1d(nn.Module):
     def __init__(self, channel_mixer: nn.Module, spatial_mixer: nn.Module):
         super().__init__()
@@ -180,7 +214,7 @@ class MTransformer(nn.Module):
 
         self.blocks = nn.ModuleList([
             Block1d(
-                channel_mixer=MLP(d_model, depth=2, expand=mlp_expand, activation=SwiGLU()),
+                channel_mixer=ResMLP(d_model, depth=2, expand=mlp_expand, activation=SwiGLU()),
                 spatial_mixer=CausalMultiheadAttentionMixer(d_model, n_heads, causal=causal)
             )
             for _ in range(n_layers)
@@ -196,7 +230,7 @@ class MTransformer(nn.Module):
 
 class _MTemplate(nn.Module):
     def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True,
-                 channel_mixer=MLP, spatial_mixer=MultiheadAttentionMixer):
+                 channel_mixer=ResMLP, spatial_mixer=MultiheadAttentionMixer):
         super().__init__()
         self.d_model = d_model
 
@@ -244,23 +278,29 @@ class Embedder(nn.Module):
         return self.embedding(x)
 
 
-class T_Symbolic1dSeqModel(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4,
+class Symbolic1dSeqModel(nn.Module):
+    def __init__(self, vocab_size: int, d_model: int, n_layers: int, n_heads: int = 8, channel_expand: int = 4,
                  causal: bool = True,
-                 pos_encoder: bool | nn.Module = SinusoidalPositionalEncoding,
+                 max_len=1024,
+                 pos_encoder: bool | None | nn.Module = SinusoidalPositionalEncoding,
                  embedder=Embedder,
-                 channel_mixer=MLP,
+                 channel_mixer=ResMLP,
                  spatial_mixer=MultiheadAttentionMixer):
         super().__init__()
+        self.vocab_size = vocab_size
+        self.max_len = max_len
+        self.causal = causal
         self.d_model = d_model
 
         self.embedder = embedder(vocab_size=vocab_size, d_model=d_model)
-        self.pos_encoder = SinusoidalPositionalEncoding if pos_encoder is True else (
-            pos_encoder if pos_encoder is not False else nn.Identity())
+
+        self.pos_encoder = pos_encoder(d_model, max_len=max_len) if pos_encoder is not None else \
+            (SinusoidalPositionalEncoding(d_model, max_len=max_len) if pos_encoder is True else nn.Identity())
+
         self.blocks = nn.ModuleList([
             Block1d(
-                channel_mixer=channel_mixer(d_model, depth=2, expand=mlp_expand, activation=nn.GELU()),
-                spatial_mixer=spatial_mixer(d_model, n_heads, causal=causal)
+                channel_mixer=channel_mixer(d_model=d_model, depth=2, expand=channel_expand, activation=nn.GELU()),
+                spatial_mixer=spatial_mixer(d_model=d_model, n_heads=n_heads, causal=causal)
             )
             for _ in range(n_layers)
         ])
@@ -275,7 +315,7 @@ class T_Symbolic1dSeqModel(nn.Module):
         for block in self.blocks:
             x = block(x)
         x = self.unembedder(x)
-        return self.norm(x)
+        return x
 
 
 def test_causality(module=MTransformer(8, 4, 2)):
@@ -306,5 +346,16 @@ def test_causality(module=MTransformer(8, 4, 2)):
             print("Causality verified")
 
 
+def test_symbolic_model(model):
+    vocab_size = model.vocab_size
+    length = model.max_len
+    x = torch.randint(0, vocab_size, (2, length))
+    print(f"Input shape {x.shape}")
+    x = model(x)
+    print(f"Output shape {x.shape}")
+    print(f"Bounds:  min:{x.min()}, max:{x.max()}, mean:{x.mean()}, std:{x.std()}, sum_of_a_vector: {x[0, 0, :].sum()}")
+
+
 if __name__ == "__main__":
-    test_causality(MTransformer(16, 4, 2))
+    # test_causality(MTransformer(16, 4, 2))
+    test_symbolic_model(Symbolic1dSeqModel(128, 16, 4, 2))
