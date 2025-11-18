@@ -90,10 +90,10 @@ class MultiheadAttentionMixer(nn.Module):
             q, k = self.rope(q, k)
 
         attn_mask = None
-        if self.causal:
-            attn_mask = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), diagonal=1)
+        """if self.causal:
+            attn_mask = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), diagonal=1)"""
 
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=self.causal)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
 
         return self.out(attn)
