@@ -7,43 +7,53 @@ from Vathos.Utils import *
 
 
 class RoPE(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 8192):
+    def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
         super().__init__()
-        self.d_model = d_model
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        self.register_buffer("inv_freq", inv_freq)
-        self._seq_len_cached = 0
+        self.dim = dim
+        self.base = base
+        self.max_len = max_len
+
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
         self._cos_cached = None
         self._sin_cached = None
+        self._seq_len_cached = 0
 
-    def _update_cache(self, seq_len: int, device: torch.device):
-        if seq_len > self._seq_len_cached:
+    def _update_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device):
+        if seq_len > self._seq_len_cached or self._cos_cached is None:
             self._seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+            t = torch.arange(seq_len, device=device, dtype=dtype)
             freqs = torch.outer(t, self.inv_freq)
-            self._cos_cached = freqs.cos()
-            self._sin_cached = freqs.sin()
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor):
-        seq_len = q.shape[2]
-        self._update_cache(seq_len, q.device)
+            emb = torch.cat([freqs, freqs], dim=-1)
+            self._cos_cached = emb.cos()
+            self._sin_cached = emb.sin()
 
-        cos = self._cos_cached[:seq_len, :].unsqueeze(0).unsqueeze(0)
-        sin = self._sin_cached[:seq_len, :].unsqueeze(0).unsqueeze(0)
+    def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        seq_len = x.shape[-3] if x.ndim == 4 else x.shape[-2]
 
-        return (
-            self._apply_rotary(q, cos, sin),
-            self._apply_rotary(k, cos, sin)
-        )
+        cos = cos[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)  # [1, L, 1, D] or [1, L, D]
+        sin = sin[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
 
-    @staticmethod
-    def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-        x1, x2 = x[..., ::2], x[..., 1::2]
-        x_rotated = torch.stack([
-            x1 * cos - x2 * sin,
-            x2 * cos + x1 * sin
-        ], dim=-1).flatten(-2)
-        return x_rotated
+        x1, x2 = x.chunk(2, dim=-1)  # each: [..., D//2]
+
+        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor = None):
+        assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
+        if k is not None:
+            assert k.shape == q.shape, "k must have same shape as q"
+
+        self._update_cache(q.shape[-3] if q.ndim == 4 else q.shape[-2], q.dtype, q.device)
+
+        cos = self._cos_cached
+        sin = self._sin_cached
+
+        q_rope = self._apply_rotary_emb(q, cos, sin)
+        k_rope = self._apply_rotary_emb(k, cos, sin) if k is not None else None
+
+        return (q_rope, k_rope) if k_rope is not None else q_rope
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -304,12 +314,15 @@ class Symbolic1dSeq2SeqModel(nn.Module):
                  spatial_mixer=MultiheadAttentionMixer,
                  channel_args: dict = None,
                  spatial_args: dict = None,
+                 rope=False
                  ):
         super().__init__()
+        if rope and spatial_mixer is not MultiheadAttentionMixer:
+            flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
         if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
-            spatial_args = {"causal": True, "n_heads": 8}
+            spatial_args = {"causal": True, "n_heads": 8, "rope": rope}
         if spatial_args is None:
             spatial_args = {}
         if channel_args is None:
@@ -371,13 +384,14 @@ class Symbolic1dSeq2SeqModel(nn.Module):
                         with torch.no_grad():
                             module.weight.data *= depth_scale
 
-    def forward(self, x: torch.LongTensor):
+    def forward(self, x: torch.LongTensor, unembed=True):
         x = self.embedder(x) * math.sqrt(self.d_model)
         x = self.pos_encoder(x)
         for block in self.blocks:
             x = block(x)
         x = self.norm(x)
-        x = self.unembedder(x)
+        if unembed:
+            x = self.unembedder(x)
         return x
 
 
@@ -409,6 +423,34 @@ def test_causality(module=MTransformer(8, 4, 2)):
             print("Causality verified")
 
 
+def test_causality_symbolic(module=Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True)):
+    torch.manual_seed(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = module
+    x = torch.randint(0, model.vocab_size, (2, model.max_len), device=device)
+
+    print(f"\nInput shape: {x.shape}")
+
+    with torch.no_grad():
+        output = model(x)
+
+    model.eval()
+    with torch.no_grad():
+        full_output = model(x, unembed=False)
+
+        for t in range(1, 20):
+            prefix_output = model(x[:, :t], unembed=False)
+
+            max_diff = (full_output[:, :t] - prefix_output).abs().max().item()
+
+            if max_diff > 1e-5:
+                print(f"Causality violated")
+                break
+        else:
+            print("Causality verified")
+
+
 def test_symbolic_model(model):
     vocab_size = model.vocab_size
     length = model.max_len
@@ -420,5 +462,5 @@ def test_symbolic_model(model):
 
 
 if __name__ == "__main__":
-    test_causality(MTransformer(16, 4, 2))
+    test_causality_symbolic(Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True, rope=True))
     test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True))
