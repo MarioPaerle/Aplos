@@ -29,4 +29,5 @@ model = Symbolic1dSeq2SeqModel(100, 16, 100,
                                spatial_args={"expand": 2})
 test_symbolic_model(model)
 ```
+Additionally, _embedder_ and _pos_encoder_ classes can be also passes to Symbolic1dSeq2SeqModel init. pos_encoder can be also set to None -> Identity, False -> Identity, True -> Sinusoidal
 

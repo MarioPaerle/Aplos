@@ -1,6 +1,5 @@
 import torch
 import matplotlib.pyplot as plt
-import inspect
 
 
 FLAG_PASS = 3
@@ -22,6 +21,8 @@ def cumsum(x):
 
 
 def power_weigthed_cumsum(x, a=0.999, rescale=True):
+    """a torch implementation of a power weighted cumsum,
+    which can be applied to batched inputs of shapes [B, L, d] or [B, L, d1, d2], summing over L"""
     if a - 1 == 0:
         return cumsum(x)
     if len(x.shape) == 3:

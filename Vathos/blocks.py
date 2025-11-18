@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
 import math
-from Utils import *
+from Vathos.Utils import *
 
 
 class RoPE(nn.Module):
