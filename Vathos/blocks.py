@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
+import math
 from Utils import *
 
 
@@ -43,6 +44,25 @@ class RoPE(nn.Module):
             x2 * cos + x1 * sin
         ], dim=-1).flatten(-2)
         return x_rotated
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        self.d_model = d_model
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+        return x + self.pe[:L]
 
 
 class MultiheadAttentionMixer(nn.Module):
@@ -225,13 +245,18 @@ class Embedder(nn.Module):
 
 
 class T_Symbolic1dSeqModel(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True,
-                 channel_mixer=MLP, spatial_mixer=MultiheadAttentionMixer):
+    def __init__(self, vocab_size: int, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4,
+                 causal: bool = True,
+                 pos_encoder: bool | nn.Module = SinusoidalPositionalEncoding,
+                 embedder=Embedder,
+                 channel_mixer=MLP,
+                 spatial_mixer=MultiheadAttentionMixer):
         super().__init__()
         self.d_model = d_model
 
-        self.embedder = Embedder(vocab_size=vocab_size, d_model=d_model)
-
+        self.embedder = embedder(vocab_size=vocab_size, d_model=d_model)
+        self.pos_encoder = SinusoidalPositionalEncoding if pos_encoder is True else (
+            pos_encoder if pos_encoder is not False else nn.Identity())
         self.blocks = nn.ModuleList([
             Block1d(
                 channel_mixer=channel_mixer(d_model, depth=2, expand=mlp_expand, activation=nn.GELU()),
@@ -240,14 +265,16 @@ class T_Symbolic1dSeqModel(nn.Module):
             for _ in range(n_layers)
         ])
 
-        self.unembedder = nn.Linear(d_model, d_model)
+        self.unembedder = nn.Linear(d_model, vocab_size)
 
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.LongTensor):
-        self
+        x = self.embedder(x)
+        x = self.pos_encoder(x)
         for block in self.blocks:
             x = block(x)
+        x = self.unembedder(x)
         return self.norm(x)
 
 
