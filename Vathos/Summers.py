@@ -4,24 +4,26 @@ from Vathos.Utils import *
 
 
 class BaseSummerMixer(nn.Module):
-    def __init__(self, d_model: int, causal=True):
+    def __init__(self, d_model: int, causal=True, a=0.8):
         super().__init__()
         assert causal, "BaseSummerMixer Module only supports causal=True, "
         self.d_model = d_model
+        self.a = a
 
-    def forward(self, x: torch.Tensor, a=0.95):
-        return power_weigthed_cumsum(x, a=a) + x
+    def forward(self, x: torch.Tensor):
+        return power_weigthed_cumsum(x, a=self.a) + x
 
 
 class BaseGatedSummerMixer(nn.Module):
-    def __init__(self, d_model: int, causal=True):
+    def __init__(self, d_model: int, causal=True, a=0.8):
         super().__init__()
         assert causal, "BaseSummerMixer Module only supports causal=True, "
         self.d_model = d_model
         self.gate = nn.Linear(d_model, d_model)
+        self.a = a
 
-    def forward(self, x: torch.Tensor, a=0.95):
-        return power_weigthed_cumsum(x * self.gate(x), a=a) + x
+    def forward(self, x: torch.Tensor):
+        return power_weigthed_cumsum(x * self.gate(x), a=self.a) + x
 
 
 class DSummer1(nn.Module):
@@ -35,15 +37,16 @@ class DSummer1(nn.Module):
 
 
 class DFullSummer1(nn.Module):
-    def __init__(self, d_model: int, causal=True):
+    def __init__(self, d_model: int, causal=True, a=0.8):
         super().__init__()
         assert causal, "BaseSummerMixer Module only supports causal=True, "
         self.d_model = d_model
         self.gate1 = nn.Linear(d_model, d_model)
         self.gate2 = nn.Linear(d_model, d_model)
+        self.a = a
 
-    def forward(self, x: torch.Tensor, a):
-        return power_weigthed_cumsum(x * self.gate1(x), a=a) * self.gate2(x) + x
+    def forward(self, x: torch.Tensor):
+        return power_weigthed_cumsum(x * self.gate1(x), a=self.a) * self.gate2(x) + x
 
 
 class LinAtt(nn.Module):
