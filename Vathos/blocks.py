@@ -394,6 +394,38 @@ class Symbolic1dSeq2SeqModel(nn.Module):
             x = self.unembedder(x)
         return x
 
+    @torch.no_grad()
+    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9,
+                 device='cpu'):
+        self.eval()
+        if prompt.dim() == 1:
+            prompt = prompt.unsqueeze(0)
+
+        generated = prompt.clone().to(device)
+
+        for _ in range(max_length):
+            logits_uncond = self.forward(generated)
+
+            logits = logits_uncond
+            next_token_logits = logits[:, -1, :] / temperature
+
+            sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+            sorted_indices_to_remove[:, 0] = 0
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            next_token_logits[indices_to_remove] = float('-inf')
+
+            probs = F.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            generated = torch.cat([generated, next_token], dim=1)
+
+            if next_token.item() == 0:
+                break
+
+        return generated
+
 
 def test_causality(module=MTransformer(8, 4, 2)):
     torch.manual_seed(42)
@@ -462,5 +494,8 @@ def test_symbolic_model(model):
 
 
 if __name__ == "__main__":
-    test_causality_symbolic(Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True, rope=True))
-    test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True))
+    test_causality_symbolic(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True, rope=True))
+    test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True))
+    model = Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True)
+    out = model.generate(torch.tensor([0]), 100, 1)
+    print(out)
