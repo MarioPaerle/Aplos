@@ -66,7 +66,7 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class MultiheadAttentionMixer(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, causal: bool):
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
@@ -75,7 +75,7 @@ class MultiheadAttentionMixer(nn.Module):
 
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
-        self.rope = RoPE(self.head_dim)
+        self.rope = RoPE(self.head_dim) if rope else nn.Identity()
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
@@ -368,7 +368,7 @@ class Symbolic1dSeq2SeqModel(nn.Module):
                             module.weight.data *= depth_scale
 
     def forward(self, x: torch.LongTensor):
-        x = self.embedder(x)
+        x = self.embedder(x) * math.sqrt(self.d_model)
         x = self.pos_encoder(x)
         for block in self.blocks:
             x = block(x)
