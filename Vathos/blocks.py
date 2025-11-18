@@ -75,7 +75,10 @@ class MultiheadAttentionMixer(nn.Module):
 
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
-        self.rope = RoPE(self.head_dim) if rope else nn.Identity()
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
@@ -83,7 +86,8 @@ class MultiheadAttentionMixer(nn.Module):
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
-        q, k = self.rope(q, k)
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
         attn_mask = None
         if self.causal:
@@ -320,7 +324,7 @@ class Symbolic1dSeq2SeqModel(nn.Module):
 
         self.embedder = embedder(vocab_size=vocab_size, d_model=d_model)
 
-        self.pos_encoder = pos_encoder(d_model, max_len=max_len) if pos_encoder is not None else \
+        self.pos_encoder = pos_encoder(d_model, max_len=max_len) if pos_encoder not in (True, False, None) else \
             (SinusoidalPositionalEncoding(d_model, max_len=max_len) if pos_encoder is True else nn.Identity())
 
         self.blocks = nn.ModuleList([
@@ -417,4 +421,4 @@ def test_symbolic_model(model):
 
 if __name__ == "__main__":
     test_causality(MTransformer(16, 4, 2))
-    test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 2))
+    test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True))
