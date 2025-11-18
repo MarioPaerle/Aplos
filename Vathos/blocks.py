@@ -294,28 +294,29 @@ class Embedder(nn.Module):
 class Symbolic1dSeq2SeqModel(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
                  max_len=1024,
-                 pos_encoder: bool | None | nn.Module = SinusoidalPositionalEncoding,
+                 pos_encoder: bool | None | nn.Module = None,
                  embedder=Embedder,
                  channel_mixer=MLP,
                  spatial_mixer=MultiheadAttentionMixer,
                  channel_args: dict = None,
-                 spatial_args: dict = None
+                 spatial_args: dict = None,
                  ):
         super().__init__()
         if channel_args is None and channel_mixer is MLP:
-            channel_args = {"expand": 4, "activation": nn.GELU, "depth": 2}
+            channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
         if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
-            spatial_args = {"causal": True, "n_heads": 2}
+            spatial_args = {"causal": True, "n_heads": 8}
         if spatial_args is None:
             spatial_args = {}
         if channel_args is None:
-            spatial_args = {}
+            channel_args = {}
 
         self.spatial_args = spatial_args
         self.channel_args = channel_args
         self.vocab_size = vocab_size
         self.max_len = max_len
         self.d_model = d_model
+        self.n_layers = n_layers
 
         self.embedder = embedder(vocab_size=vocab_size, d_model=d_model)
 
@@ -330,16 +331,49 @@ class Symbolic1dSeq2SeqModel(nn.Module):
             for _ in range(n_layers)
         ])
 
-        self.unembedder = nn.Linear(d_model, vocab_size)
-
         self.norm = nn.LayerNorm(d_model)
+        self.unembedder = nn.Linear(d_model, vocab_size, bias=False)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """
+        Initialize weights following GPT-style conventions:
+        - Small std for embeddings
+        - Xavier/Kaiming for linear layers
+        - Scaled initialization for residual projections
+        """
+        std_embed = 0.02
+        nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
+
+        nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
+
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                std_init = 0.02
+                nn.init.normal_(module.weight, mean=0.0, std=std_init)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+        for block_idx, block in enumerate(self.blocks):
+            for name, module in block.named_modules():
+                if isinstance(module, nn.Linear):
+                    depth_scale = (2.0 * self.n_layers) ** -0.5
+                    if 'out' in name.lower() or 'proj' in name.lower() or '.l2' in name or '.g2' in name:
+                        with torch.no_grad():
+                            module.weight.data *= depth_scale
 
     def forward(self, x: torch.LongTensor):
         x = self.embedder(x)
         x = self.pos_encoder(x)
         for block in self.blocks:
             x = block(x)
-        x = self.unembedder(self.norm(x))
+        x = self.norm(x)
+        x = self.unembedder(x)
         return x
 
 
