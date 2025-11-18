@@ -72,8 +72,8 @@ class LinAtt2(nn.Module):
     def __init__(self, d_model, expand):
         super().__init__()
         self.d_model = d_model
-        self.q = nn.Linear(d_model, int(d_model*expand))
-        self.k = nn.Linear(d_model, int(d_model*expand))
+        self.q = nn.Linear(d_model, int(d_model * expand))
+        self.k = nn.Linear(d_model, int(d_model * expand))
         self.v = nn.Linear(d_model, d_model)
 
     def feature(self, x):
@@ -89,10 +89,16 @@ class LinAtt2(nn.Module):
         return torch.einsum("bld, blde -> ble", Q, KV) + x
 
 
-x = torch.randn(2, 128, 16)
-model = BaseGatedSummerMixer(16)
-y1 = model(x, 0.97)
-y2 = model(x, 0.85)
-plot(x=x[0, :, 0].detach(), y1=y1[0, :, 0].detach(), y2=y2[0, :, 0].detach())
-
-# test_causality(LinAtt(8))
+if __name__ == '__main__':
+    """x = torch.randn(2, 128, 16)
+    model = BaseGatedSummerMixer(16)
+    y1 = model(x, 0.97)
+    y2 = model(x, 0.85)
+    plot(x=x[0, :, 0].detach(), y1=y1[0, :, 0].detach(), y2=y2[0, :, 0].detach())
+    # test_causality(LinAtt(8))"""
+    model = Symbolic1dSeq2SeqModel(100, 16, 100,
+                                   channel_mixer=MLP,
+                                   channel_args={"expand": 2},
+                                   spatial_mixer=LinAtt2,
+                                   spatial_args={"expand": 2})
+    test_symbolic_model(model)
