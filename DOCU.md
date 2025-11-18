@@ -24,7 +24,7 @@ Here's an example:
 ```
 model = Symbolic1dSeq2SeqModel(100, 16, 100,
                                channel_mixer=MLP,
-                               channel_args={"expand": 2},
+                               channel_args={"depth": 2, "expand": 2, "activation": nn.GELU},
                                spatial_mixer=LinAtt2,
                                spatial_args={"expand": 2})
 test_symbolic_model(model)

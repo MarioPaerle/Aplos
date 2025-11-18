@@ -96,9 +96,10 @@ if __name__ == '__main__':
     y2 = model(x, 0.85)
     plot(x=x[0, :, 0].detach(), y1=y1[0, :, 0].detach(), y2=y2[0, :, 0].detach())
     # test_causality(LinAtt(8))"""
-    model = Symbolic1dSeq2SeqModel(100, 16, 100,
-                                   channel_mixer=MLP,
-                                   channel_args={"expand": 2},
+    model = Symbolic1dSeq2SeqModel(100, 16, 4,
+                                   channel_mixer=ResMLP,
+                                   channel_args={"depth": 2, "expand": 2, "activation": nn.ReLU},
                                    spatial_mixer=LinAtt2,
                                    spatial_args={"expand": 2})
     test_symbolic_model(model)
+    print(model)

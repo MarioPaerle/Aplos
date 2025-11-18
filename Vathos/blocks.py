@@ -125,6 +125,7 @@ class CausalMultiheadAttentionMixer(nn.Module):
 
 class SwiGLU(nn.Module):
     gated = True
+
     def forward(self, x: torch.Tensor):
         x, gate = x.chunk(2, dim=-1)
         return x * F.silu(gate)
@@ -157,6 +158,47 @@ class MLP(nn.Module):
             layers.append(nn.Linear(in_dim, out_dim, bias=True))
             if i < depth - 1:
                 layers.append(activation())
+
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor):
+        return self.layers(x)
+
+
+class ResMLPBlock(nn.Module):
+    def __init__(self, d_model, expand=2, norm=True, activation: Callable = nn.GELU):
+        super().__init__()
+        self.activation1 = activation()
+        self.activation2 = activation()
+        self.norm = norm
+        self.d_model = d_model
+        self.expand = expand
+        self.l1 = nn.Linear(d_model, d_model * expand, bias=True)
+        self.l2 = nn.Linear(d_model * expand, d_model, bias=True)
+
+        self.g1 = nn.Linear(d_model, d_model * expand, bias=True)
+        self.g2 = nn.Linear(d_model * expand, d_model, bias=True)
+
+        self.norm = nn.LayerNorm(d_model) if self.norm else nn.Identity()
+
+    def forward(self, x: torch.Tensor):
+        x = self.l2(self.activation1(self.l1(x)))
+        x = self.norm(x) + x
+        x = self.g2(self.activation2(self.g1(x)))
+        return x
+
+
+class ResMLP(nn.Module):
+    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
+        super().__init__()
+        self.d_model = d_model
+        self.depth = depth
+        self.expand = expand
+        self.activation = activation
+
+        layers = []
+        for i in range(depth):
+            layers.append(ResMLPBlock(d_model, expand=expand, activation=activation))
 
         self.layers = nn.Sequential(*layers)
 
@@ -201,7 +243,7 @@ class MTransformer(nn.Module):
 
 class _MTemplate(nn.Module):
     def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True,
-                 channel_mixer=ResMLP, spatial_mixer=MultiheadAttentionMixer):
+                 channel_mixer=MLP, spatial_mixer=MultiheadAttentionMixer):
         super().__init__()
         self.d_model = d_model
 
@@ -261,9 +303,9 @@ class Symbolic1dSeq2SeqModel(nn.Module):
                  ):
         super().__init__()
         if channel_args is None and channel_mixer is MLP:
-            channel_args = {"expand": 4, "activation": nn.GELU, "depth":2}
+            channel_args = {"expand": 4, "activation": nn.GELU, "depth": 2}
         if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
-            spatial_args = {"causal": True, "n_heads":2}
+            spatial_args = {"causal": True, "n_heads": 2}
         if spatial_args is None:
             spatial_args = {}
         if channel_args is None:
