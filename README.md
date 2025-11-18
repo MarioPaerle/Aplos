@@ -1,4 +1,4 @@
-# APLOS
+# APLOS 
 I started building this collection of specific libraries to help myself with prototyping
 new deep learning architettures.
 

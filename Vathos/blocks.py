@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
+from Utils import *
 
 
 class RoPE(nn.Module):
@@ -190,6 +191,61 @@ class _MTemplate(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor):
+        for block in self.blocks:
+            x = block(x)
+        return self.norm(x)
+
+
+class Embedder(nn.Module):
+    def __init__(self, vocab_size, d_model: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.frozen = False
+        self.embedding = nn.Embedding(vocab_size, d_model)
+
+    def freeze(self):
+        if self.frozen:
+            flag("Trying to freeze an already frozen Embedder")
+        else:
+            self.embedding.weight.requires_grad = False
+            self.frozen = True
+
+    def unfreeze(self):
+        if self.frozen:
+            self.embedding.weight.requires_grad = True
+            self.frozen = False
+        else:
+            flag("Trying to unfreeze an already unfrozen Embedder")
+
+    def forward(self, x):
+        assert x.dtype == torch.long and x.min() >= 0 and x.max() <= self.vocab_size, ("either dtype is not long, or x "
+                                                                                       "is not in [0, vocab_size]")
+        return self.embedding(x)
+
+
+class T_Symbolic1dSeqModel(nn.Module):
+    def __init__(self, vocab_size: int, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True,
+                 channel_mixer=MLP, spatial_mixer=MultiheadAttentionMixer):
+        super().__init__()
+        self.d_model = d_model
+
+        self.embedder = Embedder(vocab_size=vocab_size, d_model=d_model)
+
+        self.blocks = nn.ModuleList([
+            Block1d(
+                channel_mixer=channel_mixer(d_model, depth=2, expand=mlp_expand, activation=nn.GELU()),
+                spatial_mixer=spatial_mixer(d_model, n_heads, causal=causal)
+            )
+            for _ in range(n_layers)
+        ])
+
+        self.unembedder = nn.Linear(d_model, d_model)
+
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.LongTensor):
+        self
         for block in self.blocks:
             x = block(x)
         return self.norm(x)
