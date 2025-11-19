@@ -92,16 +92,18 @@ class LinAtt2(nn.Module):
 
 
 if __name__ == '__main__':
-    """x = torch.randn(2, 128, 16)
-    model = BaseGatedSummerMixer(16)
-    y1 = model(x, 0.97)
-    y2 = model(x, 0.85)
-    plot(x=x[0, :, 0].detach(), y1=y1[0, :, 0].detach(), y2=y2[0, :, 0].detach())
-    # test_causality(LinAtt(8))"""
-    model = Symbolic1dSeq2SeqModel(100, 16, 4,
+    from Mamba2 import Mamba2Mixer
+    """x = torch.randn(2, 2116, 4)
+    model1 = BaseGatedSummerMixer(4, a=0.95)
+    model2 = BaseGatedSummerMixer(4, a=0.8)
+    y1 = model1(x)
+    y2 = model2(x)
+    plot(x=x[0, :, 0].detach(), y1=y1[0, :, 0].detach(), y2=y2[0, :, 0].detach())"""
+    # test_causality(LinAtt(8))
+    model = Symbolic1dSeq2SeqModel(100, 256, 4,
                                    channel_mixer=ResMLP,
                                    channel_args={"depth": 2, "expand": 2, "activation": nn.ReLU},
-                                   spatial_mixer=LinAtt2,
+                                   spatial_mixer=Mamba2Mixer,
                                    spatial_args={"expand": 2})
-    test_symbolic_model(model)
-    print(model)
+    test_causality_symbolic(model)
+    # print(model)

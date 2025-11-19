@@ -21,8 +21,10 @@ def cumsum(x):
 
 
 def power_weigthed_cumsum(x, a=0.999, rescale=True):
-    """a torch implementation of a power weighted cumsum,
-    which can be applied to batched inputs of shapes [B, L, d] or [B, L, d1, d2], summing over L"""
+    """
+    a torch implementation of a power weighted cumsum,
+    which can be applied to batched inputs of shapes [B, L, d] or [B, L, d1, d2], summing over L
+    """
     if a - 1 == 0:
         return cumsum(x)
     if len(x.shape) == 3:
@@ -32,8 +34,10 @@ def power_weigthed_cumsum(x, a=0.999, rescale=True):
     else:
         raise RuntimeError("x shapes mus be of form [B, L, d] or [B, L, d, d]")
 
-    return torch.cumsum(x / alpha_pow, dim=1) * alpha_pow * (alpha_pow[:, 0, ...] if rescale else 1)
-
+    z = x / alpha_pow
+    z[:, alpha_pow[0, :, 0] < 0.01, :] = z # TODO: This must be fixed
+    # alpha_pow[alpha_pow < 0.0001] = 1
+    return torch.cumsum(z, dim=1) * alpha_pow * (alpha_pow[:, 0, ...] if rescale else 1)
 
 def precompute_power_weigthed_cumsum(x, alpha_pow):
     return torch.cumsum(x / alpha_pow, dim=1) * alpha_pow
