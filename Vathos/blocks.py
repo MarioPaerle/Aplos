@@ -7,6 +7,14 @@ from Vathos.Utils import *
 from typing import Tuple, Optional, Union
 
 
+class Identity(nn.Module):
+    def __init__(self, *args,  **kwargs):
+        super(Identity, self).__init__()
+
+    def forward(self, x):
+        return x
+
+
 class RoPE(nn.Module):
     def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
         super().__init__()
@@ -309,13 +317,14 @@ class Embedder(nn.Module):
 class PatchEmbedder(nn.Module):
     def __init__(
             self,
+            vocab_size=None,
+            d_model: int = 768,
             img_size: Union[int, Tuple[int, int]] = 224,
             patch_size: Union[int, Tuple[int, int]] = 16,
             in_chans: int = 3,
-            embed_dim: int = 768,
             flatten: bool = True,
             norm_layer: Optional[nn.Module] = None,
-            cls: bool = False,  # ← NEW
+            cls: bool = False,
     ):
         super().__init__()
         if isinstance(patch_size, int):
@@ -326,17 +335,17 @@ class PatchEmbedder(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.in_chans = in_chans
-        self.embed_dim = embed_dim
+        self.embed_dim = d_model
         self.flatten = flatten
         self.frozen = False
         self.norm = norm_layer if norm_layer is not None else None
         self.use_cls = cls  # ← NEW
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chans, d_model, kernel_size=patch_size, stride=patch_size)
 
         if self.use_cls:
             assert flatten, "CLS token requires flatten=True"
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))  # ← NEW
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))  # ← NEW
 
         self.grid_size = None
         if img_size is not None:
@@ -446,8 +455,10 @@ class Symbolic1dSeq2SeqModel(nn.Module):
                  max_len=1024,
                  pos_encoder: bool | None | nn.Module = None,
                  embedder=Embedder,
+                 unembedder=nn.Linear,
                  channel_mixer=MLP,
                  spatial_mixer=MultiheadAttentionMixer,
+                 embedder_args: dict = None,
                  channel_args: dict = None,
                  spatial_args: dict = None,
                  rope=False
@@ -463,6 +474,8 @@ class Symbolic1dSeq2SeqModel(nn.Module):
             spatial_args = {}
         if channel_args is None:
             channel_args = {}
+        if embedder_args is None:
+            embedder_args = {}
 
         self.spatial_args = spatial_args
         self.channel_args = channel_args
@@ -471,7 +484,7 @@ class Symbolic1dSeq2SeqModel(nn.Module):
         self.d_model = d_model
         self.n_layers = n_layers
 
-        self.embedder = embedder(vocab_size=vocab_size, d_model=d_model)
+        self.embedder = embedder(vocab_size=vocab_size, d_model=d_model, **embedder_args)
 
         self.pos_encoder = pos_encoder(d_model, max_len=max_len) if pos_encoder not in (True, False, None) else \
             (SinusoidalPositionalEncoding(d_model, max_len=max_len) if pos_encoder is True else nn.Identity())
@@ -485,7 +498,7 @@ class Symbolic1dSeq2SeqModel(nn.Module):
         ])
 
         self.norm = nn.LayerNorm(d_model)
-        self.unembedder = nn.Linear(d_model, vocab_size, bias=False)
+        self.unembedder = unembedder(d_model, vocab_size)
 
         self._init_weights()
 
@@ -497,9 +510,14 @@ class Symbolic1dSeq2SeqModel(nn.Module):
         - Scaled initialization for residual projections
         """
         std_embed = 0.02
-        nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
-
-        nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
+        try:
+            nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
+        except:
+            pass
+        try:
+            nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
+        except:
+            pass
 
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -630,14 +648,16 @@ def test_symbolic_model(model):
 
 
 if __name__ == "__main__":
-    pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
-    unem = ClsHead(768, 10)
-    img = torch.randn(2, 3, 224, 224)
-    y = pe(img)
+    """pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
+    unem = ClsHead(768, 10)"""
+    img = torch.randn(4, 3, 32, 32)
+    """y = pe(img)
     print(y.shape)
-    print(unem(y).shape)
-    """test_causality_symbolic(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True, rope=True))
-    test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True))
-    model = Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True)
-    out = model.generate(torch.tensor([0]), 100, 1)
-    print(out)"""
+    print(unem(y).shape)"""
+    # ViT = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
+    #                                                embedder=PatchEmbedder, unembedder=ClsHead,
+    #                                embedder_args={'img_size': 32, 'patch_size': 4})
+    model = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
+                                   embedder=Identity, unembedder=Identity, rope=True)
+
+    print(model(torch.randn(4, 128, 16)).shape)
