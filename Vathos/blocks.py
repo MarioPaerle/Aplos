@@ -6,7 +6,6 @@ import math
 from Vathos.Utils import *
 from typing import Tuple, Optional, Union
 
-
 ACTIVS = {
     'tanh': nn.Tanh,
     'sigmoid': nn.Sigmoid,
@@ -17,9 +16,10 @@ ACTIVS = {
 }
 
 
-
 class Identity(nn.Module):
-    def __init__(self, *args,  **kwargs):
+    __name__ = "Identity"
+
+    def __init__(self, *args, **kwargs):
         super(Identity, self).__init__()
 
     def forward(self, x):
@@ -27,6 +27,8 @@ class Identity(nn.Module):
 
 
 class RoPE(nn.Module):
+    __name__ = "RoPE"
+
     def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
         super().__init__()
         self.dim = dim
@@ -77,6 +79,8 @@ class RoPE(nn.Module):
 
 
 class SinusoidalPositionalEncoding(nn.Module):
+    __name__ = "SinusoidalPositionalEncoding"
+
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
         self.d_model = d_model
@@ -96,6 +100,8 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class MultiheadAttentionMixer(nn.Module):
+    __name__ = "MultiheadAttentionMixer"
+
     def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False):
         super().__init__()
         self.causal = causal
@@ -130,6 +136,8 @@ class MultiheadAttentionMixer(nn.Module):
 
 
 class CausalMultiheadAttentionMixer(nn.Module):
+    __name__ = "CausalMultiheadAttentionMixer"
+
     def __init__(self, d_model: int, n_heads: int, causal=True):
         super().__init__()
         assert causal, \
@@ -166,6 +174,8 @@ class SwiGLU(nn.Module):
 
 
 class MLP(nn.Module):
+    __name__ = "MLP"
+
     def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
         super().__init__()
         hidden_dim = d_model * expand
@@ -298,6 +308,8 @@ class _MTemplate(nn.Module):
 
 
 class Embedder(nn.Module):
+    __name__ = "SymbolicEmbedder"
+
     def __init__(self, vocab_size, d_model: int):
         super().__init__()
         self.vocab_size = vocab_size
@@ -326,6 +338,8 @@ class Embedder(nn.Module):
 
 
 class PatchEmbedder(nn.Module):
+    __name__ = "PatchEmbedder"
+
     def __init__(
             self,
             vocab_size=None,
@@ -442,6 +456,8 @@ class PatchEmbedder(nn.Module):
 
 
 class MeanClassificationHead(nn.Module):
+    __name__ = "MeanClassificationHead"
+
     def __init__(self, d_model, vocab_size):
         super().__init__()
         self.proj = nn.Linear(d_model, vocab_size)
@@ -452,6 +468,8 @@ class MeanClassificationHead(nn.Module):
 
 
 class ClsHead(nn.Module):
+    __name__ = "Cls Head"
+
     def __init__(self, d_model, vocab_size):
         super().__init__()
         self.proj = nn.Linear(d_model, vocab_size)
@@ -462,6 +480,7 @@ class ClsHead(nn.Module):
 
 
 class Symbolic1dSeq2SeqModel(nn.Module):
+    __name__ = "Symbolic1dSeq2SeqModel"
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
                  max_len=1024,
                  pos_encoder: bool | None | nn.Module = None,
@@ -487,6 +506,9 @@ class Symbolic1dSeq2SeqModel(nn.Module):
             channel_args = {}
         if embedder_args is None:
             embedder_args = {}
+
+        self.spatial_mixer = spatial_mixer
+        self.channel_mixer = channel_mixer
 
         self.spatial_args = spatial_args
         self.channel_args = channel_args
@@ -591,6 +613,18 @@ class Symbolic1dSeq2SeqModel(nn.Module):
 
         return generated
 
+    def summary(self):
+        print(f'{NUM}VATHOS{RES} Model Summary:')
+        print(f"{NUM}Symbolic1dSeq2SeqModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
+        print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)}")
+        print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)}")
+        print(f"\t - {NUM}Spatial Mixer{RES}: {getname(self.spatial_mixer)}({self.spatial_args})")
+        print(f"\t - {NUM}Channel Mixer{RES}: {getname(self.channel_mixer)}({self.channel_args})")
+        print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
+        print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
+        print()
+
+
 
 def test_causality(module=MTransformer(8, 4, 2)):
     torch.manual_seed(42)
@@ -669,6 +703,6 @@ if __name__ == "__main__":
     #                                                embedder=PatchEmbedder, unembedder=ClsHead,
     #                                embedder_args={'img_size': 32, 'patch_size': 4})
     model = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
-                                   embedder=Identity, unembedder=Identity, rope=True)
-
-    print(model(torch.randn(4, 128, 16)).shape)
+                                   embedder=PatchEmbedder, unembedder=nn.Linear, rope=True)
+    model.summary()
+    print(model(torch.randn(4, 3, 224, 224)).shape)
