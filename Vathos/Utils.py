@@ -7,6 +7,7 @@ try:
     BAD = Fore.RED
     RES = Fore.RESET
     SEC = Fore.LIGHTBLACK_EX
+    HM = Fore.YELLOW
     NUM = Fore.BLUE
 except:
     GOOD = ""
@@ -14,6 +15,7 @@ except:
     RES =  ""
     SEC =  ""
     NUM = ""
+    HM = ""
 
 
 FLAG_PASS = 3
@@ -62,7 +64,7 @@ def precompute_power_weigthed_cumsum(x, alpha_pow):
 
 def flag(text, level=1):
     if level <= FLAG_PASS:
-        print(f"||FLAG LV.{level}|| {text}")
+        print(f"{SEC}||{HM}FLAG LV.{level}{SEC}||{HM} {text}{RES}")
 
 
 def getname(obj):

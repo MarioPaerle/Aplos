@@ -52,6 +52,9 @@ class GPTTransformer(nn.Module):
     def generate(self, *args, **kwargs):
         return self.model.generate(*args, *kwargs)
 
+    def summary(self):
+        self.model.summary()
+
 
 class BERTTransformer(nn.Module):
     def __init__(self, vocab_size, d_model, n_layers, n_heads, max_len, ff_expand=2, activation='gelu', dropout=0.1,
@@ -98,6 +101,9 @@ class BERTTransformer(nn.Module):
     @torch.no_grad()
     def generate(self, *args, **kwargs):
         raise NotImplementedError("Yet to Implement")
+
+    def summary(self):
+        self.model.summary()
 
 
 class ViTTransformer(nn.Module):
@@ -149,6 +155,9 @@ class ViTTransformer(nn.Module):
     def generate(self, *args, **kwargs):
         raise NotImplementedError("Yet to Implement")
 
+    def summary(self):
+        self.model.summary()
+
 
 class DiTTransformer(nn.Module):
     def __init__(self, d_model, n_layers, n_heads, ff_expand=2, activation='gelu', dropout=0.1,
@@ -195,3 +204,6 @@ class DiTTransformer(nn.Module):
     @torch.no_grad()
     def generate(self, *args, **kwargs):
         raise NotImplementedError("Yet to Implement")
+
+    def summary(self):
+        self.model.summary()
