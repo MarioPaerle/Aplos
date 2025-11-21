@@ -7,6 +7,17 @@ from Vathos.Utils import *
 from typing import Tuple, Optional, Union
 
 
+ACTIVS = {
+    'tanh': nn.Tanh,
+    'sigmoid': nn.Sigmoid,
+    'relu': nn.ReLU,
+    'gelu': nn.GELU,
+    'elu': nn.ELU,
+    'lrelu': nn.LeakyReLU,
+}
+
+
+
 class Identity(nn.Module):
     def __init__(self, *args,  **kwargs):
         super(Identity, self).__init__()
