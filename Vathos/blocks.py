@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from typing import Callable
 import math
 from Vathos.Utils import *
+from typing import Tuple, Optional, Union
 
 
 class RoPE(nn.Module):
@@ -305,6 +306,141 @@ class Embedder(nn.Module):
         return self.embedding(x)
 
 
+class PatchEmbedder(nn.Module):
+    def __init__(
+            self,
+            img_size: Union[int, Tuple[int, int]] = 224,
+            patch_size: Union[int, Tuple[int, int]] = 16,
+            in_chans: int = 3,
+            embed_dim: int = 768,
+            flatten: bool = True,
+            norm_layer: Optional[nn.Module] = None,
+            cls: bool = False,  # ← NEW
+    ):
+        super().__init__()
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, patch_size)
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+        self.flatten = flatten
+        self.frozen = False
+        self.norm = norm_layer if norm_layer is not None else None
+        self.use_cls = cls  # ← NEW
+
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+        if self.use_cls:
+            assert flatten, "CLS token requires flatten=True"
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))  # ← NEW
+
+        self.grid_size = None
+        if img_size is not None:
+            self.grid_size = (math.ceil(img_size[0] / patch_size[0]),
+                              math.ceil(img_size[1] / patch_size[1]))
+
+        self._num_patches = None
+        if self.grid_size is not None:
+            self._num_patches = self.grid_size[0] * self.grid_size[1]
+
+    def freeze(self):
+        if self.frozen:
+            flag("Trying to freeze an already frozen PatchEmbedder")
+            return
+        for p in self.proj.parameters():
+            p.requires_grad = False
+        if self.norm is not None:
+            for p in self.norm.parameters():
+                p.requires_grad = False
+        if self.use_cls:  # ← FREEZE CLS TOKEN TOO
+            self.cls_token.requires_grad = False
+        self.frozen = True
+
+    def unfreeze(self):
+        if not self.frozen:
+            flag("Trying to unfreeze an already unfrozen PatchEmbedder")
+            return
+        for p in self.proj.parameters():
+            p.requires_grad = True
+        if self.norm is not None:
+            for p in self.norm.parameters():
+                p.requires_grad = True
+        if self.use_cls:
+            self.cls_token.requires_grad = True
+        self.frozen = False
+
+    def num_patches(self, H: Optional[int] = None, W: Optional[int] = None) -> int:
+        if H is None or W is None:
+            if self.img_size is not None:
+                H, W = self.img_size
+            else:
+                raise ValueError("Must provide H and W or set img_size during init.")
+        ph, pw = self.patch_size
+        Hp = math.ceil(H / ph)
+        Wp = math.ceil(W / pw)
+        return Hp * Wp
+
+    def _pad_to_patch_multiple(self, x: torch.Tensor) -> torch.Tensor:
+        _, _, H, W = x.shape
+        ph, pw = self.patch_size
+        pad_h = (ph - H % ph) % ph
+        pad_w = (pw - W % pw) % pw
+        if pad_h == 0 and pad_w == 0:
+            return x
+        return nn.functional.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 4, "Input must be 4D (B, C, H, W)"
+        assert x.dtype in (torch.float32, torch.float16, torch.bfloat16), "Input dtype must be float"
+        B, C, H, W = x.shape
+        assert C == self.in_chans, f"Expected {self.in_chans} channels, got {C}"
+
+        x = self._pad_to_patch_multiple(x)
+
+        x = self.proj(x)  # (B, embed_dim, H_p, W_p)
+        H_p, W_p = x.shape[2], x.shape[3]
+        self._num_patches = H_p * W_p
+
+        if self.flatten:
+            x = x.flatten(2).transpose(1, 2)  # (B, N, embed_dim)
+
+            if self.use_cls:
+                cls_tok = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
+                x = torch.cat((cls_tok, x), dim=1)  # (B, 1+N, D)
+
+            if self.norm is not None:
+                x = self.norm(x)
+        else:
+            if self.norm is not None:
+                x = self.norm(x)
+
+        return x
+
+
+class MeanClassificationHead(nn.Module):
+    def __init__(self, d_model, vocab_size):
+        super().__init__()
+        self.proj = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        x = x.mean(dim=1)
+        return self.proj(x)
+
+
+class ClsHead(nn.Module):
+    def __init__(self, d_model, vocab_size):
+        super().__init__()
+        self.proj = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        x = x[:, -1:, :]
+        return self.proj(x)[:, 0, :]
+
+
 class Symbolic1dSeq2SeqModel(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
                  max_len=1024,
@@ -494,8 +630,14 @@ def test_symbolic_model(model):
 
 
 if __name__ == "__main__":
-    test_causality_symbolic(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True, rope=True))
+    pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
+    unem = ClsHead(768, 10)
+    img = torch.randn(2, 3, 224, 224)
+    y = pe(img)
+    print(y.shape)
+    print(unem(y).shape)
+    """test_causality_symbolic(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True, rope=True))
     test_symbolic_model(Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True))
     model = Symbolic1dSeq2SeqModel(128, 16, 4, 200, pos_encoder=True)
     out = model.generate(torch.tensor([0]), 100, 1)
-    print(out)
+    print(out)"""
