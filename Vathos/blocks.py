@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from typing import Callable
 import math
 from Vathos.Utils import *
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional, Union, List
+import re
 
 ACTIVS = {
     'tanh': nn.Tanh,
@@ -24,6 +25,15 @@ class Identity(nn.Module):
 
     def forward(self, x):
         return x
+
+
+class UnbiasedLinear(nn.Module):
+    def __init__(self, input_features, output_features):
+        super(UnbiasedLinear, self).__init__()
+        self.linear = nn.Linear(input_features, output_features, bias=False)
+
+    def forward(self, x):
+        return self.linear(x)
 
 
 class RoPE(nn.Module):
@@ -264,6 +274,18 @@ class Block1d(nn.Module):
         return x
 
 
+class BlockStack(nn.Module):
+    def __init__(self, blocks: Tuple[Block1d | nn.Module]):
+        super().__init__()
+        self.blocks = blocks
+        self.stack = nn.ModuleList(blocks)
+
+    def forward(self, x: torch):
+        for block in self.stack:
+            x = block(x)
+        return x
+
+
 class MTransformer(nn.Module):
     def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True):
         super().__init__()
@@ -479,13 +501,14 @@ class ClsHead(nn.Module):
         return self.proj(x)[:, 0, :]
 
 
-class Symbolic1dSeq2SeqModel(nn.Module):
-    __name__ = "Symbolic1dSeq2SeqModel"
+class SequenceModel(nn.Module):
+    __name__ = "SequenceModel"
+
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
                  max_len=1024,
                  pos_encoder: bool | None | nn.Module = None,
                  embedder=Embedder,
-                 unembedder=nn.Linear,
+                 unembedder=UnbiasedLinear,
                  channel_mixer=MLP,
                  spatial_mixer=MultiheadAttentionMixer,
                  embedder_args: dict = None,
@@ -625,7 +648,6 @@ class Symbolic1dSeq2SeqModel(nn.Module):
         print()
 
 
-
 def test_causality(module=MTransformer(8, 4, 2)):
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -654,7 +676,7 @@ def test_causality(module=MTransformer(8, 4, 2)):
             print("Causality verified")
 
 
-def test_causality_symbolic(module=Symbolic1dSeq2SeqModel(128, 16, 4, 2, pos_encoder=True)):
+def test_causality_symbolic(module=SequenceModel(128, 16, 4, 2, pos_encoder=True)):
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -692,6 +714,66 @@ def test_symbolic_model(model):
     print(f"Bounds:  min:{x.min()}, max:{x.max()}, mean:{x.mean()}, std:{x.std()}, sum_of_a_vector: {x[0, 0, :].sum()}")
 
 
+#######################################################################################################ù
+
+NAMES = {
+    "MLP": MLP,
+    "Attention": MultiheadAttentionMixer,
+    "MHA": MultiheadAttentionMixer,
+    "CMHA": CausalMultiheadAttentionMixer,
+    "Embed": Embedder,
+    "EMBED": Embedder,
+    "E": Embedder,
+    "PE": SinusoidalPositionalEncoding,
+    "PatchEmbedder": PatchEmbedder,
+    "ClassificationHead": MeanClassificationHead,
+    "MCH": MeanClassificationHead,
+    "ClsHead": ClsHead,
+}
+
+
+def expand_architecture(arch_string):
+    pattern = r"(\(.+?\))x(\d+)"
+
+    def replacer(match):
+        content = match.group(1)
+        count = int(match.group(2))
+        return " -> ".join([content] * count)
+
+    return re.sub(pattern, replacer, arch_string)
+
+
+def assemble(code, d_model=512):
+    code = code.strip()
+    if "x" in code:
+        code = expand_architecture(code)
+    divided = code.split("->")
+
+    for arch in divided:
+        arch = arch.strip()
+        if arch.startswith("("):
+            layers = []
+            for subarch in arch[1:-1].split(","):
+                subarch = subarch.strip()
+                if subarch in NAMES:
+                    layer = NAMES[subarch](d_model=d_model)
+                else:
+                    raise ValueError(f"Unknown Layer: {subarch}")
+                layers.append(subarch)
+            block = Block1d(*layers)
+
+        else:
+            if arch in NAMES:
+                layer = NAMES[arch]
+            elif hasattr(nn, arch):
+                layer = getattr(nn, arch)
+            else:
+                raise ValueError(f"Unknown Layer: {arch}")
+
+
+
+
+
 if __name__ == "__main__":
     """pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
     unem = ClsHead(768, 10)"""
@@ -702,7 +784,9 @@ if __name__ == "__main__":
     # ViT = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
     #                                                embedder=PatchEmbedder, unembedder=ClsHead,
     #                                embedder_args={'img_size': 32, 'patch_size': 4})
-    model = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
-                                   embedder=PatchEmbedder, unembedder=nn.Linear, rope=True)
+    model = SequenceModel(10, 16, 4, 200, pos_encoder=True,
+                          embedder=PatchEmbedder, unembedder=UnbiasedLinear, rope=True)
     model.summary()
-    print(model(torch.randn(4, 3, 224, 224)).shape)
+    print(assemble("EMBED -> (Attention, MLP)x4 -> UNEMBED"))
+    """"EMBED -> (Attention, MLP)x4 -> UNEMBED"
+    "EMBED -> (Attention, MLP)x4 -> UNEMBED"""
