@@ -10,3 +10,7 @@
 - MlpMixer
 - KOBRA1
 - MLA
+
+# Vathos Vision
+- Unet
+- Normal ResNet

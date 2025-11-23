@@ -31,8 +31,8 @@ class ConvResBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, activation=nn.ReLU):
         super(ConvResBlock, self).__init__()
         self.bn = nn.BatchNorm2d(out_channels)
-        self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size, stride=stride, padding=padding)
-        self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size, stride=stride, padding=padding)
+        self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size, padding='same')
+        self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size, padding='same')
         self.convout = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
         self.activation = activation()
 
@@ -40,6 +40,7 @@ class ConvResBlock(nn.Module):
         res = x
         x = self.bn(x)
         x = self.activation(self.conv1(x))
+        x = self.conv2(x)
         x = x + res
         return self.convout(x)
 
