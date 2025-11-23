@@ -27,6 +27,23 @@ class Identity(nn.Module):
         return x
 
 
+class ConvResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, activation=nn.ReLU):
+        super(ConvResBlock, self).__init__()
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size, stride=stride, padding=padding)
+        self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size, stride=stride, padding=padding)
+        self.convout = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+        self.activation = activation()
+
+    def forward(self, x):
+        res = x
+        x = self.bn(x)
+        x = self.activation(self.conv1(x))
+        x = x + res
+        return self.convout(x)
+
+
 class UnbiasedLinear(nn.Module):
     def __init__(self, input_features, output_features):
         super(UnbiasedLinear, self).__init__()
@@ -648,6 +665,8 @@ class SequenceModel(nn.Module):
         print()
 
 
+#######################################################################################################################
+
 def test_causality(module=MTransformer(8, 4, 2)):
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -769,9 +788,6 @@ def assemble(code, d_model=512):
                 layer = getattr(nn, arch)
             else:
                 raise ValueError(f"Unknown Layer: {arch}")
-
-
-
 
 
 if __name__ == "__main__":
