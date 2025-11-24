@@ -28,6 +28,8 @@ class Identity(nn.Module):
 
 
 class ConvResBlock(nn.Module):
+    __complexity__ = "O(L k^2 in out)"
+
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, activation=nn.ReLU):
         super(ConvResBlock, self).__init__()
         self.bn = nn.BatchNorm2d(out_channels)
@@ -46,6 +48,8 @@ class ConvResBlock(nn.Module):
 
 
 class UnbiasedLinear(nn.Module):
+    __name__ = "UnbiasedLinear"
+    __complexity__ = "O(Ld^2)"
     def __init__(self, input_features, output_features):
         super(UnbiasedLinear, self).__init__()
         self.linear = nn.Linear(input_features, output_features, bias=False)
@@ -54,147 +58,10 @@ class UnbiasedLinear(nn.Module):
         return self.linear(x)
 
 
-class RoPE(nn.Module):
-    __name__ = "RoPE"
-
-    def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
-        super().__init__()
-        self.dim = dim
-        self.base = base
-        self.max_len = max_len
-
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        self._cos_cached = None
-        self._sin_cached = None
-        self._seq_len_cached = 0
-
-    def _update_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device):
-        if seq_len > self._seq_len_cached or self._cos_cached is None:
-            self._seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=device, dtype=dtype)
-            freqs = torch.outer(t, self.inv_freq)
-
-            emb = torch.cat([freqs, freqs], dim=-1)
-            self._cos_cached = emb.cos()
-            self._sin_cached = emb.sin()
-
-    def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        seq_len = x.shape[-3] if x.ndim == 4 else x.shape[-2]
-
-        cos = cos[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)  # [1, L, 1, D] or [1, L, D]
-        sin = sin[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
-
-        x1, x2 = x.chunk(2, dim=-1)  # each: [..., D//2]
-
-        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
-
-    def forward(self, q: torch.Tensor, k: torch.Tensor = None):
-        assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
-        if k is not None:
-            assert k.shape == q.shape, "k must have same shape as q"
-
-        self._update_cache(q.shape[-3] if q.ndim == 4 else q.shape[-2], q.dtype, q.device)
-
-        cos = self._cos_cached
-        sin = self._sin_cached
-
-        q_rope = self._apply_rotary_emb(q, cos, sin)
-        k_rope = self._apply_rotary_emb(k, cos, sin) if k is not None else None
-
-        return (q_rope, k_rope) if k_rope is not None else q_rope
-
-
-class SinusoidalPositionalEncoding(nn.Module):
-    __name__ = "SinusoidalPositionalEncoding"
-
-    def __init__(self, d_model: int, max_len: int = 5000):
-        super().__init__()
-        self.d_model = d_model
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-        return x + self.pe[:L]
-
-
-class MultiheadAttentionMixer(nn.Module):
-    __name__ = "MultiheadAttentionMixer"
-
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False):
-        super().__init__()
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
-
-        if self.rope is not None:
-            q, k = self.rope(q, k)
-
-        attn_mask = None
-        """if self.causal:
-            attn_mask = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), diagonal=1)"""
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-
-        return self.out(attn)
-
-
-class CausalMultiheadAttentionMixer(nn.Module):
-    __name__ = "CausalMultiheadAttentionMixer"
-
-    def __init__(self, d_model: int, n_heads: int, causal=True):
-        super().__init__()
-        assert causal, \
-            ("CausalMultiheadAttentionMixer Module only supports causal=True, "
-             "if you meant to create a non Causal Attention use the MultiheadAttentionMixer")
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        self.rope = RoPE(self.head_dim)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
-
-        q, k = self.rope(q, k)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-
-        return self.out(attn)
-
-
 class SwiGLU(nn.Module):
     gated = True
+    __name__ = "SwiGLU"
+    __complexity__ = "O(L)"
 
     def forward(self, x: torch.Tensor):
         x, gate = x.chunk(2, dim=-1)
@@ -203,6 +70,7 @@ class SwiGLU(nn.Module):
 
 class MLP(nn.Module):
     __name__ = "MLP"
+    __complexity__ = "O(depth L d)"
 
     def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
         super().__init__()
@@ -304,6 +172,171 @@ class BlockStack(nn.Module):
         return x
 
 
+class CausalConv1d(nn.Module):
+    __name__ = "CausalConv1d"
+    __complexity__ = "O(Ldk)"
+
+    def __init__(self, d, k=3):
+        super().__init__()
+        self.d = d
+        self.k = k
+        self.pad = k - 1
+
+        self.K = nn.Parameter(torch.randn(d, k) / (k ** 0.5))
+
+    def forward(self, x):
+        b, L, d = x.shape
+        x = x.transpose(1, 2)
+        x_pad = F.pad(x, (self.pad, 0))
+        out = F.conv1d(x_pad, self.K.unsqueeze(1), groups=d)
+        return out.transpose(1, 2)
+
+
+########################################################################################################################
+#   TRANSFORMERS
+########################################################################################################################
+
+class RoPE(nn.Module):
+    __name__ = "RoPE"
+
+    def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        self.max_len = max_len
+
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        self._cos_cached = None
+        self._sin_cached = None
+        self._seq_len_cached = 0
+
+    def _update_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device):
+        if seq_len > self._seq_len_cached or self._cos_cached is None:
+            self._seq_len_cached = seq_len
+            t = torch.arange(seq_len, device=device, dtype=dtype)
+            freqs = torch.outer(t, self.inv_freq)
+
+            emb = torch.cat([freqs, freqs], dim=-1)
+            self._cos_cached = emb.cos()
+            self._sin_cached = emb.sin()
+
+    def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        seq_len = x.shape[-3] if x.ndim == 4 else x.shape[-2]
+
+        cos = cos[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)  # [1, L, 1, D] or [1, L, D]
+        sin = sin[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
+
+        x1, x2 = x.chunk(2, dim=-1)  # each: [..., D//2]
+
+        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor = None):
+        assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
+        if k is not None:
+            assert k.shape == q.shape, "k must have same shape as q"
+
+        self._update_cache(q.shape[-3] if q.ndim == 4 else q.shape[-2], q.dtype, q.device)
+
+        cos = self._cos_cached
+        sin = self._sin_cached
+
+        q_rope = self._apply_rotary_emb(q, cos, sin)
+        k_rope = self._apply_rotary_emb(k, cos, sin) if k is not None else None
+
+        return (q_rope, k_rope) if k_rope is not None else q_rope
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    __name__ = "SinusoidalPositionalEncoding"
+    __complexity__ = "O(L^2 d^2)"
+
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        self.d_model = d_model
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+        return x + self.pe[:L]
+
+
+class MultiheadAttentionMixer(nn.Module):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False):
+        super().__init__()
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+
+        attn_mask = None
+        """if self.causal:
+            attn_mask = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), diagonal=1)"""
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+
+        return self.out(attn)
+
+
+class CausalMultiheadAttentionMixer(nn.Module):
+    __name__ = "CausalMultiheadAttentionMixer"
+
+    def __init__(self, d_model: int, n_heads: int, causal=True):
+        super().__init__()
+        assert causal, \
+            ("CausalMultiheadAttentionMixer Module only supports causal=True, "
+             "if you meant to create a non Causal Attention use the MultiheadAttentionMixer")
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        self.rope = RoPE(self.head_dim)
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
+
+        q, k = self.rope(q, k)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+
+        return self.out(attn)
+
+
 class MTransformer(nn.Module):
     def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True):
         super().__init__()
@@ -349,6 +382,7 @@ class _MTemplate(nn.Module):
 
 class Embedder(nn.Module):
     __name__ = "SymbolicEmbedder"
+    __complexity__ = "O(Ld)"
 
     def __init__(self, vocab_size, d_model: int):
         super().__init__()
@@ -375,6 +409,11 @@ class Embedder(nn.Module):
         assert x.dtype == torch.long and x.min() >= 0 and x.max() <= self.vocab_size, ("either dtype is not long, or x "
                                                                                        "is not in [0, vocab_size]")
         return self.embedding(x)
+
+
+########################################################################################################################
+#   VISION
+########################################################################################################################
 
 
 class PatchEmbedder(nn.Module):
