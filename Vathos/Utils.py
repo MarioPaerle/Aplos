@@ -68,4 +68,4 @@ def flag(text, level=1):
 
 
 def getname(obj):
-    return obj.__name__ if hasattr(obj, "__name__") else type(obj)
+    return obj.__name__ if hasattr(obj, "__name__") else str(type(obj)).split('.')[-1]

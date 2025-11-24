@@ -6,6 +6,7 @@ import math
 from Vathos.Utils import *
 from typing import Tuple, Optional, Union, List
 import re
+from complexity import combine_big_o
 
 ACTIVS = {
     'tanh': nn.Tanh,
@@ -49,7 +50,8 @@ class ConvResBlock(nn.Module):
 
 class UnbiasedLinear(nn.Module):
     __name__ = "UnbiasedLinear"
-    __complexity__ = "O(Ld^2)"
+    __complexity__ = "O(L d^2)"
+
     def __init__(self, input_features, output_features):
         super(UnbiasedLinear, self).__init__()
         self.linear = nn.Linear(input_features, output_features, bias=False)
@@ -174,7 +176,7 @@ class BlockStack(nn.Module):
 
 class CausalConv1d(nn.Module):
     __name__ = "CausalConv1d"
-    __complexity__ = "O(Ldk)"
+    __complexity__ = "O(L d k)"
 
     def __init__(self, d, k=3):
         super().__init__()
@@ -382,7 +384,7 @@ class _MTemplate(nn.Module):
 
 class Embedder(nn.Module):
     __name__ = "SymbolicEmbedder"
-    __complexity__ = "O(Ld)"
+    __complexity__ = "O(L d)"
 
     def __init__(self, vocab_size, d_model: int):
         super().__init__()
@@ -558,6 +560,22 @@ class ClsHead(nn.Module):
         return self.proj(x)[:, 0, :]
 
 
+class VathosModel(nn.Module):
+    __name__ = "VathosModel"
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self):
+        pass
+
+    def summary(self):
+        pass
+
+    def computecomplexity(self):
+        pass
+
+
 class SequenceModel(nn.Module):
     __name__ = "SequenceModel"
 
@@ -612,6 +630,11 @@ class SequenceModel(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
         self.unembedder = unembedder(d_model, vocab_size)
+
+        self.embedder_complexity = embedder.__complexity__ if hasattr(embedder, "__complexity__") else "O(L d)"
+        self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"
+        self.spatial_complextiy = spatial_mixer.__complexity__ if hasattr(spatial_mixer, "__complexity__") else "O(L d)"
+        self.channel_complexity = channel_mixer.__complexity__ if hasattr(channel_mixer, "__complexity__") else "O(L d)"
 
         self._init_weights()
 
@@ -694,15 +717,19 @@ class SequenceModel(nn.Module):
         return generated
 
     def summary(self):
+        complexities = [self.channel_complexity, self.spatial_complextiy, self.embedder_complexity,
+                        self.unembedder_complexity]
         print(f'{NUM}VATHOS{RES} Model Summary:')
         print(f"{NUM}Symbolic1dSeq2SeqModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
-        print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)}")
-        print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)}")
-        print(f"\t - {NUM}Spatial Mixer{RES}: {getname(self.spatial_mixer)}({self.spatial_args})")
-        print(f"\t - {NUM}Channel Mixer{RES}: {getname(self.channel_mixer)}({self.channel_args})")
+        print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)} - {NUM}{self.embedder_complexity}{RES}")
+        print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)} - {NUM}{self.unembedder_complexity}{RES}")
+        print(
+            f"\t - {NUM}Spatial Mixer{RES}: {getname(self.spatial_mixer)}({self.spatial_args}) - {NUM}{self.spatial_complextiy}{RES}")
+        print(
+            f"\t - {NUM}Channel Mixer{RES}: {getname(self.channel_mixer)}({self.channel_args}) - {NUM}{self.channel_complexity}{RES}")
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
-        print()
+        print(f"Total Complexity: {NUM}{combine_big_o(complexities)}{RES}")
 
 
 #######################################################################################################################
@@ -843,6 +870,6 @@ if __name__ == "__main__":
     model = SequenceModel(10, 16, 4, 200, pos_encoder=True,
                           embedder=PatchEmbedder, unembedder=UnbiasedLinear, rope=True)
     model.summary()
-    print(assemble("EMBED -> (Attention, MLP)x4 -> UNEMBED"))
+    # print(assemble("EMBED -> (Attention, MLP)x4 -> UNEMBED"))
     """"EMBED -> (Attention, MLP)x4 -> UNEMBED"
     "EMBED -> (Attention, MLP)x4 -> UNEMBED"""

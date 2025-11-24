@@ -1,5 +1,6 @@
 # Vathos Blocks
-- Symbolic1dSeq2SeqModel needs an only-causal version with a generate() function which will support kv caching.
+- Each Block should have its own integrated timer, which can be activated, so when working with a big model,
+one can easily find the bottlenecks
 
 # Vathos Summers
 - LinearAttention full implementation
