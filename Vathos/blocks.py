@@ -1,4 +1,4 @@
-import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
@@ -7,6 +7,7 @@ from Vathos.Utils import *
 from typing import Tuple, Optional, Union, List
 import re
 from complexity import combine_big_o
+from timeit import default_timer as timer
 
 ACTIVS = {
     'tanh': nn.Tanh,
@@ -16,9 +17,72 @@ ACTIVS = {
     'elu': nn.ELU,
     'lrelu': nn.LeakyReLU,
 }
+PROFILE = False
 
 
-class Identity(nn.Module):
+class Layer(nn.Module):
+    def __init__(self):
+        super(Layer, self).__init__()
+        self.complexity = "O(1)"
+        self.__name__ = "BasicLayer"
+        self._timer_unbatched = True
+        self._tstart = 0
+        self._tend = 0
+        self._time = 0
+        self._times = []
+        self._sublayers = None
+
+    def start_timer(self):
+        self._tstart = timer()
+
+    def end_timer(self, batch_size):
+        self._tend = timer()
+        self._time = (self._tend - self._tstart) / batch_size
+        self._times.append(self._time)
+
+    def get_mean_execution_time(self):
+        return f"{np.mean(self._times):.4f}s"
+
+    def get_last_execution_time(self):
+        return self._time
+
+    def register_sublayers(self):
+        self._sublayers = []
+        print(self.__dict__.keys())
+        for att in self.__dict__:
+            if hasattr(self, 'blocks'):
+                pass
+            if isinstance(getattr(self, att), Layer):
+                self._sublayers.append(getattr(self, att))
+
+            elif isinstance(getattr(self, att), (nn.ModuleList, nn.ModuleDict)):
+                print('Beccato ', att)
+
+    def __call__(self, *args, **kwargs):
+        if self._sublayers is None:
+            self.register_sublayers()
+        if kwargs.get("profile") or PROFILE:
+            if kwargs.get("profile"):
+                del kwargs["profile"]
+            self.start_timer()
+            rets = self.forward(*args, **kwargs)
+            if not self._timer_unbatched:
+                self.end_timer(batch_size=args[0].shape[0])
+            else:
+                self.end_timer(1)
+            return rets
+        else:
+            return self.forward(*args, **kwargs)
+
+    @staticmethod
+    def register_exectution_time(fn, *args, **kwargs):
+        start_time = timer()
+        rets = fn(*args, **kwargs)
+        elapsed = timer() - start_time
+        return elapsed, rets
+
+
+class Identity(Layer):
     __name__ = "Identity"
 
     def __init__(self, *args, **kwargs):
@@ -28,7 +92,7 @@ class Identity(nn.Module):
         return x
 
 
-class ConvResBlock(nn.Module):
+class ConvResBlock(Layer):
     __complexity__ = "O(L k^2 in out)"
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, activation=nn.ReLU):
@@ -48,7 +112,7 @@ class ConvResBlock(nn.Module):
         return self.convout(x)
 
 
-class UnbiasedLinear(nn.Module):
+class UnbiasedLinear(Layer):
     __name__ = "UnbiasedLinear"
     __complexity__ = "O(L d^2)"
 
@@ -60,7 +124,7 @@ class UnbiasedLinear(nn.Module):
         return self.linear(x)
 
 
-class SwiGLU(nn.Module):
+class SwiGLU(Layer):
     gated = True
     __name__ = "SwiGLU"
     __complexity__ = "O(L)"
@@ -70,7 +134,7 @@ class SwiGLU(nn.Module):
         return x * F.silu(gate)
 
 
-class MLP(nn.Module):
+class MLP(Layer):
     __name__ = "MLP"
     __complexity__ = "O(depth L d)"
 
@@ -107,7 +171,7 @@ class MLP(nn.Module):
         return self.layers(x)
 
 
-class ResMLPBlock(nn.Module):
+class ResMLPBlock(Layer):
     def __init__(self, d_model, expand=2, norm=True, activation: Callable = nn.GELU):
         super().__init__()
         self.activation1 = activation()
@@ -130,7 +194,7 @@ class ResMLPBlock(nn.Module):
         return x
 
 
-class ResMLP(nn.Module):
+class ResMLP(Layer):
     def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
         super().__init__()
         self.d_model = d_model
@@ -148,8 +212,8 @@ class ResMLP(nn.Module):
         return self.layers(x)
 
 
-class Block1d(nn.Module):
-    def __init__(self, channel_mixer: nn.Module, spatial_mixer: nn.Module):
+class Block1d(Layer):
+    def __init__(self, channel_mixer: Layer, spatial_mixer: Layer):
         super().__init__()
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
@@ -162,8 +226,8 @@ class Block1d(nn.Module):
         return x
 
 
-class BlockStack(nn.Module):
-    def __init__(self, blocks: Tuple[Block1d | nn.Module]):
+class BlockStack(Layer):
+    def __init__(self, blocks: Tuple[Block1d | Layer]):
         super().__init__()
         self.blocks = blocks
         self.stack = nn.ModuleList(blocks)
@@ -174,7 +238,7 @@ class BlockStack(nn.Module):
         return x
 
 
-class CausalConv1d(nn.Module):
+class CausalConv1d(Layer):
     __name__ = "CausalConv1d"
     __complexity__ = "O(L d k)"
 
@@ -198,7 +262,7 @@ class CausalConv1d(nn.Module):
 #   TRANSFORMERS
 ########################################################################################################################
 
-class RoPE(nn.Module):
+class RoPE(Layer):
     __name__ = "RoPE"
 
     def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
@@ -250,7 +314,7 @@ class RoPE(nn.Module):
         return (q_rope, k_rope) if k_rope is not None else q_rope
 
 
-class SinusoidalPositionalEncoding(nn.Module):
+class SinusoidalPositionalEncoding(Layer):
     __name__ = "SinusoidalPositionalEncoding"
     __complexity__ = "O(L^2 d^2)"
 
@@ -272,7 +336,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         return x + self.pe[:L]
 
 
-class MultiheadAttentionMixer(nn.Module):
+class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d^2)"
 
@@ -309,13 +373,13 @@ class MultiheadAttentionMixer(nn.Module):
         return self.out(attn)
 
 
-class CausalMultiheadAttentionMixer(nn.Module):
+class CausalMultiheadAttentionMixer(Layer):
     __name__ = "CausalMultiheadAttentionMixer"
 
     def __init__(self, d_model: int, n_heads: int, causal=True):
         super().__init__()
         assert causal, \
-            ("CausalMultiheadAttentionMixer Module only supports causal=True, "
+            ("CausalMultiheadAttentionMixLayer only supports causal=True, "
              "if you meant to create a non Causal Attention use the MultiheadAttentionMixer")
         self.d_model = d_model
         self.n_heads = n_heads
@@ -339,7 +403,7 @@ class CausalMultiheadAttentionMixer(nn.Module):
         return self.out(attn)
 
 
-class MTransformer(nn.Module):
+class MTransformer(Layer):
     def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True):
         super().__init__()
         self.d_model = d_model
@@ -360,7 +424,7 @@ class MTransformer(nn.Module):
         return self.norm(x)
 
 
-class _MTemplate(nn.Module):
+class _MTemplate(Layer):
     def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True,
                  channel_mixer=MLP, spatial_mixer=MultiheadAttentionMixer):
         super().__init__()
@@ -382,7 +446,7 @@ class _MTemplate(nn.Module):
         return self.norm(x)
 
 
-class Embedder(nn.Module):
+class Embedder(Layer):
     __name__ = "SymbolicEmbedder"
     __complexity__ = "O(L d)"
 
@@ -418,7 +482,7 @@ class Embedder(nn.Module):
 ########################################################################################################################
 
 
-class PatchEmbedder(nn.Module):
+class PatchEmbedder(Layer):
     __name__ = "PatchEmbedder"
 
     def __init__(
@@ -429,7 +493,7 @@ class PatchEmbedder(nn.Module):
             patch_size: Union[int, Tuple[int, int]] = 16,
             in_chans: int = 3,
             flatten: bool = True,
-            norm_layer: Optional[nn.Module] = None,
+            norm_layer: Optional[Layer] = None,
             cls: bool = False,
     ):
         super().__init__()
@@ -536,7 +600,7 @@ class PatchEmbedder(nn.Module):
         return x
 
 
-class MeanClassificationHead(nn.Module):
+class MeanClassificationHead(Layer):
     __name__ = "MeanClassificationHead"
 
     def __init__(self, d_model, vocab_size):
@@ -548,7 +612,7 @@ class MeanClassificationHead(nn.Module):
         return self.proj(x)
 
 
-class ClsHead(nn.Module):
+class ClsHead(Layer):
     __name__ = "Cls Head"
 
     def __init__(self, d_model, vocab_size):
@@ -560,7 +624,7 @@ class ClsHead(nn.Module):
         return self.proj(x)[:, 0, :]
 
 
-class VathosModel(nn.Module):
+class VathosModel(Layer):
     __name__ = "VathosModel"
 
     def __init__(self):
@@ -576,12 +640,12 @@ class VathosModel(nn.Module):
         pass
 
 
-class SequenceModel(nn.Module):
+class SequenceModel(Layer):
     __name__ = "SequenceModel"
 
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
                  max_len=1024,
-                 pos_encoder: bool | None | nn.Module = None,
+                 pos_encoder: bool | None | Layer | nn.Module = None,
                  embedder=Embedder,
                  unembedder=UnbiasedLinear,
                  channel_mixer=MLP,
@@ -860,16 +924,20 @@ def assemble(code, d_model=512):
 if __name__ == "__main__":
     """pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
     unem = ClsHead(768, 10)"""
-    img = torch.randn(4, 3, 32, 32)
+    x = torch.randint(0, 9, size=(2, 64))
     """y = pe(img)
     print(y.shape)
     print(unem(y).shape)"""
     # ViT = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
     #                                                embedder=PatchEmbedder, unembedder=ClsHead,
     #                                embedder_args={'img_size': 32, 'patch_size': 4})
-    model = SequenceModel(10, 16, 4, 200, pos_encoder=True,
-                          embedder=PatchEmbedder, unembedder=UnbiasedLinear, rope=True)
+    model = SequenceModel(10, 16, 4, 64, pos_encoder=True,
+                          embedder=Embedder, unembedder=UnbiasedLinear, rope=True)
     model.summary()
+    out = model(x, profile=True)
+    out = model(x)
+    print(model._sublayers)
+    print(model.get_mean_execution_time())
     # print(assemble("EMBED -> (Attention, MLP)x4 -> UNEMBED"))
     """"EMBED -> (Attention, MLP)x4 -> UNEMBED"
     "EMBED -> (Attention, MLP)x4 -> UNEMBED"""
