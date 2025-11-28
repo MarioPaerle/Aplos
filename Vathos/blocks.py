@@ -51,9 +51,20 @@ class Layer(nn.Module):
     def register_sublayers(self):
         if self._sublayers is None:
             self._sublayers = dict()
-        for module in self._modules:
+        for i, module in enumerate(self._modules):
             if isinstance(self._modules[module], Layer):
-                self._sublayers[module] = self._modules[module]
+                if module in self._sublayers:
+                    self._sublayers[module + f'_{i}'] = self._modules[module]
+                else:
+                    self._sublayers[module] = self._modules[module]
+            elif isinstance(self._modules[module], nn.ModuleList):
+                for j, innermodule in enumerate(self._modules[module]):
+                    if isinstance(innermodule, Layer):
+                        if type(innermodule).__name__ in self._sublayers:
+                            self._sublayers[type(innermodule).__name__ + f'_{i}_{j}'] = innermodule
+
+                        else:
+                            self._sublayers[type(innermodule).__name__] = innermodule
 
     def __call__(self, *args, **kwargs):
         if self._sublayers is None:
