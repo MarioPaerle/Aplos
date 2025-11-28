@@ -16,6 +16,7 @@ ACTIVS = {
     'gelu': nn.GELU,
     'elu': nn.ELU,
     'lrelu': nn.LeakyReLU,
+    'leaky_relu': nn.LeakyReLU,
 }
 PROFILE = True
 PROFILE_BATCHED = True
@@ -51,20 +52,37 @@ class Layer(nn.Module):
     def register_sublayers(self):
         if self._sublayers is None:
             self._sublayers = dict()
-        for i, module in enumerate(self._modules):
-            if isinstance(self._modules[module], Layer):
-                if module in self._sublayers:
-                    self._sublayers[module + f'_{i}'] = self._modules[module]
-                else:
-                    self._sublayers[module] = self._modules[module]
-            elif isinstance(self._modules[module], nn.ModuleList):
-                for j, innermodule in enumerate(self._modules[module]):
-                    if isinstance(innermodule, Layer):
-                        if type(innermodule).__name__ in self._sublayers:
-                            self._sublayers[type(innermodule).__name__ + f'_{i}_{j}'] = innermodule
+        def get_unique_name(base_name, existing_names):
+            if base_name not in existing_names:
+                return base_name
+            counter = 1
+            while f"{base_name}_{counter}" in existing_names:
+                counter += 1
+            return f"{base_name}_{counter}"
 
-                        else:
-                            self._sublayers[type(innermodule).__name__] = innermodule
+        def collect_layers(module, prefix=""):
+            layers = []
+            for name, child in module.named_children():
+                if isinstance(child, Layer):
+                    layers.append((name, child))
+                    layers.extend(collect_layers(child, prefix=f"{name}."))
+                elif isinstance(child, nn.ModuleList):
+                    for i, item in enumerate(child):
+                        if isinstance(item, Layer):
+                            layers.append((f"{name}[{i}]", item))
+                            layers.extend(collect_layers(item, prefix=f"{name}[{i}]."))
+                elif isinstance(child, nn.Module):
+                    layers.extend(collect_layers(child, prefix=f"{name}."))
+            return layers
+
+        # Collect all sublayers
+        all_layers = collect_layers(self)
+
+        # Register with unique names
+        for original_name, layer in all_layers:
+            class_name = type(layer).__name__
+            unique_name = get_unique_name(class_name, self._sublayers.keys())
+            self._sublayers[unique_name] = layer
 
     def __call__(self, *args, **kwargs):
         if self._sublayers is None:
@@ -84,7 +102,8 @@ class Layer(nn.Module):
 
     def profile(self):
         batched = not self._timer_unbatched
-        print(f"Layer {NUM}{type(self).__name__}{RES} Times Profile (batched: {GOOD if batched else BAD}{batched}{RES}):")
+        print(
+            f"Layer {NUM}{type(self).__name__}{RES} Times Profile (batched: {GOOD if batched else BAD}{batched}{RES}):")
 
         for sublayer in self._sublayers:
             print(f"\t - {NUM}{sublayer}{RES}:  {self._sublayers[sublayer].get_mean_execution_time()}")
@@ -684,6 +703,8 @@ class SequenceModel(Layer):
             channel_args = {}
         if embedder_args is None:
             embedder_args = {}
+
+        self.name = name
 
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
