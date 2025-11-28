@@ -101,6 +101,7 @@ class Layer(nn.Module):
             return self.forward(*args, **kwargs)
 
     def profile(self):
+        """a Basic Layer level profiler operation"""
         batched = not self._timer_unbatched
         print(
             f"Layer {NUM}{type(self).__name__}{RES} Times Profile (batched: {GOOD if batched else BAD}{batched}{RES}):")
