@@ -1,6 +1,5 @@
 # Vathos Blocks
-- Each Block should have its own integrated timer, which can be activated, so when working with a big model,
-one can easily find the bottlenecks
+- Need to implement a way to make additional losses, like vq losses travel easily across Layers
 
 # Vathos Summers
 - LinearAttention full implementation
