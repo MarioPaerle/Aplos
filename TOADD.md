@@ -15,3 +15,4 @@ one can easily find the bottlenecks
 # Vathos Vision
 - Unet
 - Normal ResNet
+- Hyperbolic ViTs

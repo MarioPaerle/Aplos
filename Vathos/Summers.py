@@ -91,6 +91,24 @@ class LinAtt2(nn.Module):
         return torch.einsum("bld, blde -> ble", Q, KV) + x
 
 
+class ShortConvGatedMixer:
+    def __init__(self, d_model, mixer, k=4, activation=nn.Sigmoid, k1=None, k2=None):
+        super().__init__()
+        if k1 is None:
+            k1 = k2 = k
+
+        self.mixer = mixer
+        self.conv_1 = CausalConv1d(d_model, k=k1)
+        self.conv_2 = CausalConv1d(d_model, k=k2)
+        self.activation = activation()
+
+    def forward(self, x):
+        g1 = self.conv_1(x)
+        g2 = self.activation(self.conv_2(x))
+        return self.mixer(g1) * g2 + (1-g2)*x
+
+
+
 if __name__ == '__main__':
     from Mamba2 import Mamba2Mixer
     """x = torch.randn(2, 2116, 4)

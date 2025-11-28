@@ -17,7 +17,8 @@ ACTIVS = {
     'elu': nn.ELU,
     'lrelu': nn.LeakyReLU,
 }
-PROFILE = False
+PROFILE = True
+PROFILE_BATCHED = True
 
 
 class Layer(nn.Module):
@@ -25,7 +26,7 @@ class Layer(nn.Module):
         super(Layer, self).__init__()
         self.complexity = "O(1)"
         self.__name__ = "BasicLayer"
-        self._timer_unbatched = True
+        self._timer_unbatched = not PROFILE_BATCHED
         self._tstart = 0
         self._tend = 0
         self._time = 0
@@ -41,22 +42,18 @@ class Layer(nn.Module):
         self._times.append(self._time)
 
     def get_mean_execution_time(self):
-        return f"{np.mean(self._times):.4f}s"
+        mean = np.mean(self._times) if len(self._times) > 0 else None
+        return f"{mean:.4f}s" if mean is not None else "no time recorded"
 
     def get_last_execution_time(self):
         return self._time
 
     def register_sublayers(self):
-        self._sublayers = []
-        print(self.__dict__.keys())
-        for att in self.__dict__:
-            if hasattr(self, 'blocks'):
-                pass
-            if isinstance(getattr(self, att), Layer):
-                self._sublayers.append(getattr(self, att))
-
-            elif isinstance(getattr(self, att), (nn.ModuleList, nn.ModuleDict)):
-                print('Beccato ', att)
+        if self._sublayers is None:
+            self._sublayers = dict()
+        for module in self._modules:
+            if isinstance(self._modules[module], Layer):
+                self._sublayers[module] = self._modules[module]
 
     def __call__(self, *args, **kwargs):
         if self._sublayers is None:
@@ -73,6 +70,13 @@ class Layer(nn.Module):
             return rets
         else:
             return self.forward(*args, **kwargs)
+
+    def profile(self):
+        batched = not self._timer_unbatched
+        print(f"Layer {NUM}{type(self).__name__}{RES} Times Profile (batched: {GOOD if batched else BAD}{batched}{RES}):")
+
+        for sublayer in self._sublayers:
+            print(f"\t - {NUM}{sublayer}{RES}:  {self._sublayers[sublayer].get_mean_execution_time()}")
 
     @staticmethod
     def register_exectution_time(fn, *args, **kwargs):
@@ -653,7 +657,8 @@ class SequenceModel(Layer):
                  embedder_args: dict = None,
                  channel_args: dict = None,
                  spatial_args: dict = None,
-                 rope=False
+                 rope=False,
+                 name=''
                  ):
         super().__init__()
         if rope and spatial_mixer is not MultiheadAttentionMixer:
@@ -931,13 +936,11 @@ if __name__ == "__main__":
     # ViT = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
     #                                                embedder=PatchEmbedder, unembedder=ClsHead,
     #                                embedder_args={'img_size': 32, 'patch_size': 4})
-    model = SequenceModel(10, 16, 4, 64, pos_encoder=True,
-                          embedder=Embedder, unembedder=UnbiasedLinear, rope=True)
+    model = SequenceModel(10, 256, 6, 256, pos_encoder=True,
+                          embedder=Embedder, unembedder=UnbiasedLinear, rope=False)
     model.summary()
-    out = model(x, profile=True)
     out = model(x)
-    print(model._sublayers)
-    print(model.get_mean_execution_time())
-    # print(assemble("EMBED -> (Attention, MLP)x4 -> UNEMBED"))
+    model.profile()
+
     """"EMBED -> (Attention, MLP)x4 -> UNEMBED"
     "EMBED -> (Attention, MLP)x4 -> UNEMBED"""

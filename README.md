@@ -25,8 +25,11 @@ channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
 model = SequenceModel(vocab_size=VOCAB_SIZE, d_model=D_MODEL, n_layers=6, max_len=2048,
                                pos_encoder=True, rope=False, channel_args=channel_args).to(device)
 ```
-This will give you a torch.nn.Module object, which will easily adapt to your existing code, since it 
+This will give you a Vathos Layer object, which is actually a nn.Module object, which will easily adapt to your existing code, since it 
 behave exaclty as a torch object.
+Note that in this example a specific channel mixer is provided 'MLP' and its params are passed via a dict.
+Same thing could0ve been done for the spatial mixer, which by default is a MultiHeadCausalAttention.
+More details are in the DOCU.md file
 
 ---
 # Aplos Modules:
