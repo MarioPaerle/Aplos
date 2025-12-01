@@ -1,5 +1,3 @@
-"""Simple HuggingFace tokenizer wrapper with collating dataloader for text datasets."""
-
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
 from dataclasses import dataclass
@@ -146,15 +144,8 @@ class TokenizerWrapper:
         )
 
 
-# Example usage
 if __name__ == "__main__":
-    # Example 1: List of texts
-    texts = [
-        "Hello, how are you?",
-        "This is a simple example.",
-        "HuggingFace tokenizers are great!",
-        "PyTorch DataLoaders make batching easy."
-    ]
+    texts = "_tests"
 
     config = TokenizerConfig(
         model_name="bert-base-uncased",
@@ -169,24 +160,11 @@ if __name__ == "__main__":
     for batch_idx, batch in enumerate(dataloader):
         print(f"\nBatch {batch_idx}: {batch['input_ids'].shape}")
 
-        # Decode examples (skip_special_tokens=True by default)
         decoded_batch = wrapper.batch_decode(batch['input_ids'], skip_special_tokens=True)
         print(f"Decoded texts: {decoded_batch}")
 
-        # Decode single sequence
         single_decoded = wrapper.decode(batch['input_ids'][0], skip_special_tokens=True)
         print(f"First sequence: {single_decoded}")
 
-        # Example: Keep special tokens for debugging
         with_special = wrapper.decode(batch['input_ids'][0], skip_special_tokens=False)
         print(f"With special tokens: {with_special}")
-
-    # Example 2: Single file
-    # dataloader = wrapper.get_dataloader("path/to/file.txt", batch_size=2)
-
-    # Example 3: Folder of .txt files (recursive)
-    # dataloader = wrapper.get_dataloader("path/to/folder", batch_size=8)
-
-    # Debug: Access source file paths
-    # dataset = TextDataset("path/to/folder")
-    # print(f"Text 0 from: {dataset.get_file_path(0)}")
