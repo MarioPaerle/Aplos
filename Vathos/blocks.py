@@ -346,7 +346,7 @@ class GRU(Layer):
 
 
 class LinearMixer(Layer):
-    __name__ = "MLP_Mixer"
+    __name__ = "Linear Mixer"
     __complexity__ = "O(L^2 d)"
 
     def __init__(self, d_model, max_len=1000, causal=True):
@@ -356,10 +356,34 @@ class LinearMixer(Layer):
         self.W = nn.Parameter(torch.randn(max_len, max_len) / max_len)
 
     def forward(self, x):
+        x = x / math.sqrt(self.d_model)
         if self.causal:
             return torch.tril(self.W[:x.shape[1], :x.shape[1]]) @ x
         else:
             self.W[:x.shape[1], :x.shape[1]] @ x
+
+
+class MLPMixer(Layer):
+    __name__ = "Linear Mixer"
+    __complexity__ = "O(L^2 d)"
+
+    def __init__(self, d_model, max_len=1000, L_expand=1, causal=False, activation=nn.GELU):
+        super().__init__()
+        if causal:
+            if L_expand < 1:
+                raise ValueError("For the MLPMixer to be causal, L_expand must be greater than 1")
+            if L_expand > 1:
+                raise NotImplementedError("Causal MLP Mixer with L_expand is currently not implemented") # TODO: Causal Lex
+        self.causal = causal
+        self.d_model = d_model
+        self.W1 = nn.Parameter(torch.randn(max_len * L_expand, max_len) / max_len)
+        self.W2 = nn.Parameter(torch.randn(max_len, max_len * L_expand) / max_len)
+        self.activation = activation()
+
+    def forward(self, x):
+        x = x / math.sqrt(self.d_model)
+
+        return self.W2 @ self.activation(self.W1 @ x)
 
 
 class ShortConvGatedMixer(Layer):
