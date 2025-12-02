@@ -52,6 +52,7 @@ class Layer(nn.Module):
     def register_sublayers(self):
         if self._sublayers is None:
             self._sublayers = dict()
+
         def get_unique_name(base_name, existing_names):
             if base_name not in existing_names:
                 return base_name
@@ -119,6 +120,7 @@ class Layer(nn.Module):
 
 class Identity(Layer):
     __name__ = "Identity"
+    __complexity__ = "O(1)"
 
     def __init__(self, *args, **kwargs):
         super(Identity, self).__init__()
@@ -293,10 +295,49 @@ class CausalConv1d(Layer):
         return out.transpose(1, 2)
 
 
+class LSTM(Layer):
+    __name__ = "LSTM"
+    __complexity__ = "O(L d)"
+
+    def __init__(self, d_model, d_hidden, bidirectional=False, dropout=0.1, n_layer=1):
+        super().__init__()
+        self.bidirectional = bidirectional
+        self.d_model = d_model
+        self.d_hidden = d_hidden
+        self.projout = nn.Linear(d_hidden, d_model) if d_model != d_hidden else Identity
+        self.LSTM = nn.LSTM(d_model, d_hidden, bidirectional=bidirectional, batch_first=True, num_layers=n_layer)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out, _ = self.LSTM(x)
+        out = self.dropout(out)
+        return self.projout(out)
+
+
+class GRU(Layer):
+    __name__ = "GRU"
+    __complexity__ = "O(L d)"
+
+    def __init__(self, d_model, d_hidden, bidirectional=False, dropout=0.1, n_layer=1):
+        super().__init__()
+        self.bidirectional = bidirectional
+        self.d_model = d_model
+        self.d_hidden = d_hidden
+        self.projout = nn.Linear(d_hidden, d_model) if d_model != d_hidden else Identity
+        self.GRU = nn.GRU(d_model, d_hidden, bidirectional=bidirectional, batch_first=True, num_layers=n_layer)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out, _ = self.GRU(x)
+        out = self.dropout(out)
+        return self.projout(out)
+
+
 ########################################################################################################################
 #   TRANSFORMERS
 ########################################################################################################################
 
+# TODO: Needs fixes!
 class RoPE(Layer):
     __name__ = "RoPE"
 
@@ -512,6 +553,26 @@ class Embedder(Layer):
         return self.embedding(x)
 
 
+class HybridAttentionBlock1d(Layer):
+    def __init__(self, d_model, sec_mixer, sec_params, attn_params, n_attn=1, n_sec=3):
+        super().__init__()
+        self.n_sec = n_sec
+        self.n_attn = n_attn
+        self.d_model = d_model
+        self.attn_params = attn_params
+        self.sec_params = sec_params
+        self.sec_mixer = sec_mixer
+        self.attn_mixers = nn.ModuleList([MultiheadAttentionMixer(d_model, **self.attn_params) for _ in range(n_attn)])
+        self.sec_mixers = nn.ModuleList([sec_mixer(d_model, **self.sec_params) for _ in range(n_sec)])
+
+    def forward(self, x):
+        for sec in self.sec_mixers:
+            x = sec(x)
+        for attn in self.attn_mixers:
+            x = attn(x)
+        return x
+
+
 ########################################################################################################################
 #   VISION
 ########################################################################################################################
@@ -682,10 +743,10 @@ class SequenceModel(Layer):
                  max_len=1024,
                  pos_encoder: bool | None | Layer | nn.Module = None,
                  embedder=Embedder,
+                 embedder_args: dict = None,
                  unembedder=UnbiasedLinear,
                  channel_mixer=MLP,
-                 spatial_mixer=MultiheadAttentionMixer,
-                 embedder_args: dict = None,
+                 spatial_mixer: Layer | nn.Module = MultiheadAttentionMixer,
                  channel_args: dict = None,
                  spatial_args: dict = None,
                  rope=False,
@@ -706,7 +767,6 @@ class SequenceModel(Layer):
             embedder_args = {}
 
         self.name = name
-
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
 
@@ -959,6 +1019,11 @@ def assemble(code, d_model=512):
                 raise ValueError(f"Unknown Layer: {arch}")
 
 
+########################################################################################################################
+# Pre Built
+########################################################################################################################
+
+
 if __name__ == "__main__":
     """pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
     unem = ClsHead(768, 10)"""
@@ -969,8 +1034,24 @@ if __name__ == "__main__":
     # ViT = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
     #                                                embedder=PatchEmbedder, unembedder=ClsHead,
     #                                embedder_args={'img_size': 32, 'patch_size': 4})
+    spatial_mixer = HybridAttentionBlock1d
+    attn_params = {
+        'n_heads': 8,
+        'causal': True
+    }
+    sec_mixer = CausalConv1d
+    sec_params = {
+        'k': 3
+    }
+    spatial_params = {
+        'sec_mixer': sec_mixer,
+        'sec_params': sec_params,
+        'attn_params': attn_params
+    }
     model = SequenceModel(10, 256, 6, 256, pos_encoder=True,
-                          embedder=Embedder, unembedder=UnbiasedLinear, rope=False)
+                          embedder=Embedder, unembedder=UnbiasedLinear, rope=False,
+                          spatial_mixer=HybridAttentionBlock1d,
+                          spatial_args=spatial_params)
     model.summary()
     out = model(x)
     model.profile()

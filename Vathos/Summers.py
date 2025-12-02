@@ -92,12 +92,12 @@ class LinAtt2(nn.Module):
 
 
 class ShortConvGatedMixer:
-    def __init__(self, d_model, mixer=CausalMultiheadAttentionMixer, k=4, activation=nn.Sigmoid, k1=None, k2=None):
+    def __init__(self, d_model, mixer, mixer_params, k=4, activation=nn.Sigmoid, k1=None, k2=None):
         super().__init__()
         if k1 is None:
             k1 = k2 = k
 
-        self.mixer = mixer
+        self.mixer = mixer(mixer_params)
         self.conv_1 = CausalConv1d(d_model, k=k1)
         self.conv_2 = CausalConv1d(d_model, k=k2)
         self.activation = activation()
