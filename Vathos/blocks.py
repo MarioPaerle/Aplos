@@ -66,12 +66,12 @@ class Layer(nn.Module):
             for name, child in module.named_children():
                 if isinstance(child, Layer):
                     layers.append((name, child, level))
-                    layers.extend(collect_layers(child, prefix=f"{name}.", level=level+1))
+                    layers.extend(collect_layers(child, prefix=f"{name}.", level=level + 1))
                 elif isinstance(child, nn.ModuleList):
                     for i, item in enumerate(child):
                         if isinstance(item, Layer):
                             layers.append((f"{name}[{i}]", item, level))
-                            layers.extend(collect_layers(item, prefix=f"{name}[{i}].", level=level+1))
+                            layers.extend(collect_layers(item, prefix=f"{name}[{i}].", level=level + 1))
                 elif isinstance(child, nn.Module):
                     layers.extend(collect_layers(child, prefix=f"{name}.", level=level))
             return layers
@@ -117,6 +117,17 @@ class Layer(nn.Module):
         rets = fn(*args, **kwargs)
         elapsed = timer() - start_time
         return elapsed, rets
+
+
+class tWrapper(Layer):
+    __name__ = "tWrapper"
+
+    def __init__(self, module: nn.Module):
+        super(tWrapper, self).__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        self.module(*args, **kwargs)
 
 
 class Identity(Layer):
@@ -1020,6 +1031,10 @@ def assemble(code, d_model=512):
                 raise ValueError(f"Unknown Layer: {arch}")
 
 
+def wrap(module):
+    return tWrapper(module)
+
+
 ########################################################################################################################
 # Pre Built
 ########################################################################################################################
@@ -1056,6 +1071,5 @@ if __name__ == "__main__":
     model.summary()
     out = model(x)
     model.profile()
-    sw
     """"EMBED -> (Attention, MLP)x4 -> UNEMBED"
     "EMBED -> (Attention, MLP)x4 -> UNEMBED"""
