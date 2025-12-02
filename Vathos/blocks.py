@@ -1056,6 +1056,6 @@ if __name__ == "__main__":
     model.summary()
     out = model(x)
     model.profile()
-
+    sw
     """"EMBED -> (Attention, MLP)x4 -> UNEMBED"
     "EMBED -> (Attention, MLP)x4 -> UNEMBED"""
