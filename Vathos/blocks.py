@@ -61,29 +61,27 @@ class Layer(nn.Module):
                 counter += 1
             return f"{base_name}_{counter}"
 
-        def collect_layers(module, prefix=""):
+        def collect_layers(module, prefix="", level=0):
             layers = []
             for name, child in module.named_children():
                 if isinstance(child, Layer):
-                    layers.append((name, child))
-                    layers.extend(collect_layers(child, prefix=f"{name}."))
+                    layers.append((name, child, level))
+                    layers.extend(collect_layers(child, prefix=f"{name}.", level=level+1))
                 elif isinstance(child, nn.ModuleList):
                     for i, item in enumerate(child):
                         if isinstance(item, Layer):
-                            layers.append((f"{name}[{i}]", item))
-                            layers.extend(collect_layers(item, prefix=f"{name}[{i}]."))
+                            layers.append((f"{name}[{i}]", item, level))
+                            layers.extend(collect_layers(item, prefix=f"{name}[{i}].", level=level+1))
                 elif isinstance(child, nn.Module):
-                    layers.extend(collect_layers(child, prefix=f"{name}."))
+                    layers.extend(collect_layers(child, prefix=f"{name}.", level=level))
             return layers
 
-        # Collect all sublayers
         all_layers = collect_layers(self)
 
-        # Register with unique names
-        for original_name, layer in all_layers:
+        for original_name, layer, level in all_layers:
             class_name = type(layer).__name__
             unique_name = get_unique_name(class_name, self._sublayers.keys())
-            self._sublayers[unique_name] = layer
+            self._sublayers[unique_name] = {'layer': layer, 'level': level}
 
     def __call__(self, *args, **kwargs):
         if self._sublayers is None:
@@ -107,8 +105,11 @@ class Layer(nn.Module):
         print(
             f"Layer {NUM}{type(self).__name__}{RES} Times Profile (batched: {GOOD if batched else BAD}{batched}{RES}):")
 
-        for sublayer in self._sublayers:
-            print(f"\t - {NUM}{sublayer}{RES}:  {self._sublayers[sublayer].get_mean_execution_time()}")
+        for sublayer_name, sublayer_info in self._sublayers.items():
+            layer = sublayer_info['layer']
+            level = sublayer_info['level']
+            indent = "    " * level  # 4 spaces per level
+            print(f"{indent}- {NUM}{sublayer_name}{RES}: {layer.get_mean_execution_time()}")
 
     @staticmethod
     def register_exectution_time(fn, *args, **kwargs):

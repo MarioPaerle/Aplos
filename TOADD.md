@@ -1,6 +1,7 @@
 # Vathos Blocks
 - Need to implement a way to make additional losses, like vq losses travel easily across Layers
 - EMA weight training
+
 # Vathos Summers
 - LinearAttention full implementation
 - RetNets and DeltaNets
@@ -10,6 +11,7 @@
 - MlpMixer
 - KOBRA1
 - MLA
+- Mamba
 
 # Vathos Vision
 - Unet
