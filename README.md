@@ -20,7 +20,9 @@ and APLOS will automatically become colorful!
 
 # To Start
 Here's a simple implementation of an AR (Causal) Transformer:
-```from Vathos.blocks import *
+
+```
+from Vathos.blocks import *
 channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
 model = SequenceModel(vocab_size=VOCAB_SIZE, d_model=D_MODEL, n_layers=6, max_len=2048,
                                pos_encoder=True, rope=False, channel_args=channel_args).to(device)

@@ -583,7 +583,8 @@ class Embedder(Layer):
 
 
 class HybridAttentionBlock1d(Layer):
-    def __init__(self, d_model, sec_mixer, sec_params, attn_params, n_attn=1, n_sec=3):
+    def __init__(self, d_model, sec_mixer, sec_params, attn_params, n_attn=1, n_sec=3,
+                 channel_mixer=MLP, channel_params=None):
         super().__init__()
         self.n_sec = n_sec
         self.n_attn = n_attn
@@ -591,8 +592,10 @@ class HybridAttentionBlock1d(Layer):
         self.attn_params = attn_params
         self.sec_params = sec_params
         self.sec_mixer = sec_mixer
-        self.attn_mixers = nn.ModuleList([MultiheadAttentionMixer(d_model, **self.attn_params) for _ in range(n_attn)])
-        self.sec_mixers = nn.ModuleList([sec_mixer(d_model, **self.sec_params) for _ in range(n_sec)])
+        if channel_params is None and isinstance(channel_mixer, MLP):
+            channel_params = {'expand': 2}
+        self.attn_blocks = nn.ModuleList([MultiheadAttentionMixer(d_model, **self.attn_params) for _ in range(n_attn)])
+        self.sec_blocks = nn.ModuleList([sec_mixer(d_model, **self.sec_params) for _ in range(n_sec)])
 
     def forward(self, x):
         for sec in self.sec_mixers:
