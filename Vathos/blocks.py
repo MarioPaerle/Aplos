@@ -345,17 +345,21 @@ class GRU(Layer):
         return self.projout(out)
 
 
-class MLP_Mixer(Layer):
+class LinearMixer(Layer):
     __name__ = "MLP_Mixer"
     __complexity__ = "O(L^2 d)"
 
-    def __init__(self, d_model, max_len=1000):
+    def __init__(self, d_model, max_len=1000, causal=True):
         super().__init__()
+        self.causal = causal
         self.d_model = d_model
-        self.W = nn.Parameter(torch.randn(max_len, max_len))
+        self.W = nn.Parameter(torch.randn(max_len, max_len) / max_len)
 
     def forward(self, x):
-        return self.W[x.shape[1], x.shape[1]] @ x
+        if self.causal:
+            return torch.tril(self.W[:x.shape[1], :x.shape[1]]) @ x
+        else:
+            self.W[:x.shape[1], :x.shape[1]] @ x
 
 
 class ShortConvGatedMixer(Layer):
@@ -605,13 +609,30 @@ class HybridAttentionBlock1d(Layer):
         self.attn_params = attn_params
         self.sec_params = sec_params
         self.sec_mixer = sec_mixer
+        self.channel_mixer = channel_mixer
+        self.channel_params = channel_params
+
         if channel_params is None and isinstance(channel_mixer, MLP):
-            channel_params = {'expand': 2}
-        self.attn_blocks = nn.ModuleList([MultiheadAttentionMixer(d_model, **self.attn_params) for _ in range(n_attn)])
-        self.sec_blocks = nn.ModuleList([sec_mixer(d_model, **self.sec_params) for _ in range(n_sec)])
+            self.channel_params = {'expand': 2}
+        else:
+            self.channel_params = channel_params
+        self.attn_blocks = nn.ModuleList([
+            Block1d(
+                channel_mixer=self.channel_mixer(d_model=d_model, **self.channel_params),
+                spatial_mixer=MultiheadAttentionMixer(d_model=d_model, **self.attn_params)
+            )
+            for _ in range(self.n_attn)
+        ])
+        self.sec_blocks = nn.ModuleList([
+            Block1d(
+                channel_mixer=self.channel_mixer(d_model=d_model, **self.channel_params),
+                spatial_mixer=self.sec_mixer(d_model=d_model, **self.attn_params)
+            )
+            for _ in range(self.n_sec)
+        ])
 
     def forward(self, x):
-        for sec in self.sec_mixers:
+        for sec in self.sec_blocks:
             x = sec(x)
         for attn in self.attn_mixers:
             x = attn(x)
@@ -1099,8 +1120,8 @@ if __name__ == "__main__":
     }
     model = SequenceModel(10, 256, 6, 256, pos_encoder=True,
                           embedder=Embedder, unembedder=UnbiasedLinear, rope=False,
-                          spatial_mixer=HybridAttentionBlock1d,
-                          spatial_args=spatial_params)
+                          spatial_mixer=LinearMixer,
+                          spatial_args={'max_len': 256})
     model.summary()
     out = model(x)
     model.profile()
