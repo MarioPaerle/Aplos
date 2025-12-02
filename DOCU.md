@@ -22,7 +22,7 @@ and then pass the Symbolic1dSeq2SeqModel, the constructors arguments by (spatial
 
 Here's an example:
 ```
-model = Symbolic1dSeq2SeqModel(100, 16, 100,
+model = SequenceModel(100, 16, 100,
                                channel_mixer=MLP,
                                channel_args={"depth": 2, "expand": 2, "activation": nn.GELU},
                                spatial_mixer=LinAtt2,

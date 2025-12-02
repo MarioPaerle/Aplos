@@ -316,7 +316,7 @@ class LSTM(Layer):
         self.bidirectional = bidirectional
         self.d_model = d_model
         self.d_hidden = d_hidden
-        self.projout = nn.Linear(d_hidden, d_model) if d_model != d_hidden else Identity
+        self.projout = nn.Linear(d_hidden, d_model) if d_model != d_hidden else Identity()
         self.LSTM = nn.LSTM(d_model, d_hidden, bidirectional=bidirectional, batch_first=True, num_layers=n_layer)
         self.dropout = nn.Dropout(dropout)
 
@@ -335,7 +335,7 @@ class GRU(Layer):
         self.bidirectional = bidirectional
         self.d_model = d_model
         self.d_hidden = d_hidden
-        self.projout = nn.Linear(d_hidden, d_model) if d_model != d_hidden else Identity
+        self.projout = nn.Linear(d_hidden, d_model) if d_model != d_hidden else Identity()
         self.GRU = nn.GRU(d_model, d_hidden, bidirectional=bidirectional, batch_first=True, num_layers=n_layer)
         self.dropout = nn.Dropout(dropout)
 
@@ -343,6 +343,19 @@ class GRU(Layer):
         out, _ = self.GRU(x)
         out = self.dropout(out)
         return self.projout(out)
+
+
+class MLP_Mixer(Layer):
+    __name__ = "MLP_Mixer"
+    __complexity__ = "O(L^2 d)"
+
+    def __init__(self, d_model, max_len=1000):
+        super().__init__()
+        self.d_model = d_model
+        self.W = nn.Parameter(torch.randn(max_len, max_len))
+
+    def forward(self, x):
+        return self.W[x.shape[1], x.shape[1]] @ x
 
 
 class ShortConvGatedMixer(Layer):
