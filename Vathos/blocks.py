@@ -6,7 +6,7 @@ import math
 from Vathos.Utils import *
 from typing import Tuple, Optional, Union, List
 import re
-from complexity import combine_big_o
+from Vathos.complexity import combine_big_o
 from timeit import default_timer as timer
 
 ACTIVS = {
@@ -343,6 +343,23 @@ class GRU(Layer):
         out, _ = self.GRU(x)
         out = self.dropout(out)
         return self.projout(out)
+
+
+class ShortConvGatedMixer(Layer):
+    def __init__(self, d_model, mixer, mixer_params, k=4, activation=nn.Sigmoid, k1=None, k2=None):
+        super().__init__()
+        if k1 is None:
+            k1 = k2 = k
+
+        self.mixer = mixer(mixer_params)
+        self.conv_1 = CausalConv1d(d_model, k=k1)
+        self.conv_2 = CausalConv1d(d_model, k=k2)
+        self.activation = activation()
+
+    def forward(self, x):
+        g1 = self.conv_1(x)
+        g2 = self.activation(self.conv_2(x))
+        return self.mixer(g1) * g2 + (1 - g2) * x
 
 
 ########################################################################################################################
