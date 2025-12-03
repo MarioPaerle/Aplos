@@ -1,5 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 try:
     from colorama import Fore
@@ -35,6 +36,28 @@ def plot(*args, **kwargs):
 
 def cumsum(x):
     return torch.cumsum(x, dim=1)
+
+
+def batched_channelwise_conv1d(K, V):
+    """
+    Computes a convolution between two batched tensors
+    K: [B, L, d] kernel
+    V: [B, L, d] signal
+    Output: [B, L, d]
+    """
+    B, L, d = V.shape
+    V_reshaped = V.view(1, B * L, d)
+
+    K_reshaped = K.view(B * L, 1, d).flip(-1)
+
+    pad_total = d - 1
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+    V_padded = F.pad(V_reshaped, (pad_left, pad_right))
+
+    output = F.conv1d(V_padded, K_reshaped, groups=B * L)
+
+    return output.view(B, L, d)
 
 
 def power_weigthed_cumsum(x, a=0.999, rescale=True):

@@ -93,8 +93,6 @@ class LinAtt2(nn.Module):
 
 
 
-
-
 if __name__ == '__main__':
     from Mamba2 import Mamba2Mixer
     """x = torch.randn(2, 2116, 4)
