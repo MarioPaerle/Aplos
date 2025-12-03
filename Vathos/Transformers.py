@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
 import math
-from Vathos.Utils import *
+from Vathos.functions import *
 
 
 class GPTTransformer(nn.Module):

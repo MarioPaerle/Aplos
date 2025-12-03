@@ -1,6 +1,6 @@
 import torch.nn
 from Vathos.blocks import *
-from Vathos.Utils import *
+from Vathos.functions import *
 
 
 class BaseSummerMixer(nn.Module):

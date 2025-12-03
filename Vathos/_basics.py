@@ -1,7 +1,14 @@
+"""
+This modules serves as base for the Torch Basic model Structure, and profilers.
+Class Layer is the base of all Vathos layers, and ereditate from torch.nn.Module class, adding only the structures that help
+profiling, visualization, and debugging.
+Everything built with Layer is totally compatible with torch native modules.
+"""
+
 import numpy as np
 import torch.nn as nn
 from typing import Callable
-from Vathos.Utils import *
+from Vathos.functions import *
 from timeit import default_timer as timer
 
 ACTIVS = {

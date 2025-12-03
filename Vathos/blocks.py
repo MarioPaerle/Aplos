@@ -1,3 +1,7 @@
+"""
+All the layers included here aim to be already optimized by torch itself, without requiring triton/cuda kernels (explicitly)
+"""
+
 from Vathos._basics import *
 from typing import Tuple, Optional, Union, List
 import re
@@ -802,7 +806,7 @@ class SequenceModel(Layer):
         complexities = [self.channel_complexity, self.spatial_complextiy, self.embedder_complexity,
                         self.unembedder_complexity]
         print(f'{NUM}VATHOS{RES} Model Summary:')
-        print(f"{NUM}Symbolic1dSeq2SeqModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
+        print(f"{NUM}SequenceModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
         print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)} - {NUM}{self.embedder_complexity}{RES}")
         print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)} - {NUM}{self.unembedder_complexity}{RES}")
         print(
