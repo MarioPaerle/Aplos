@@ -8,12 +8,11 @@
 - Mamba2
 
 # Vathos Spatial
-- MlpMixer
 - KOBRA1
-- MLA
 - Mamba
 
 # Vathos Vision
 - Unet
 - Normal ResNet
 - Hyperbolic ViTs
+
