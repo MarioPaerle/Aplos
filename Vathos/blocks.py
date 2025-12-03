@@ -287,7 +287,7 @@ class BlockStack(Layer):
         return x
 
 
-class CausalConv1d(Layer):
+class DepthwiseCausalConv1d(Layer):
     __name__ = "CausalConv1d"
     __complexity__ = "O(L d k)"
 
@@ -304,6 +304,31 @@ class CausalConv1d(Layer):
         x = x.transpose(1, 2)
         x_pad = F.pad(x, (self.pad, 0))
         out = F.conv1d(x_pad, self.K.unsqueeze(1), groups=d)
+        return out.transpose(1, 2)
+
+
+class CausalConv1d(Layer):
+    __name__ = "CausalConv1d"
+    __complexity__ = "O(L d k)"
+
+    def __init__(self, d_model, k=3, groups=None, outproj=False):
+        super().__init__()
+        self.d = d_model
+        self.k = k
+        self.pad = k - 1
+        self.groups = groups if groups is not None else d_model
+        self.outproj = nn.Linear(groups, d_model, bias=False) if outproj else Identity()
+        if self.groups != d_model and not outproj:
+            flag(
+                "Output channel numbers will be the number of groups, use outproj=True if you want to enable a linear projection to go back to d_model")
+
+        self.K = nn.Parameter(torch.randn(d_model, k) / (k ** 0.5))
+
+    def forward(self, x):
+        b, L, d = x.shape
+        x = x.transpose(1, 2)
+        x_pad = F.pad(x, (self.pad, 0))
+        out = F.conv1d(x_pad, self.K.unsqueeze(1), groups=self.groups)
         return out.transpose(1, 2)
 
 
@@ -394,8 +419,8 @@ class ShortConvGatedMixer(Layer):
             k1 = k2 = k
 
         self.mixer = mixer(mixer_params)
-        self.conv_1 = CausalConv1d(d_model, k=k1)
-        self.conv_2 = CausalConv1d(d_model, k=k2)
+        self.conv_1 = DepthwiseCausalConv1d(d_model, k=k1)
+        self.conv_2 = DepthwiseCausalConv1d(d_model, k=k2)
         self.activation = activation()
 
     def forward(self, x):
@@ -513,6 +538,54 @@ class MultiheadAttentionMixer(Layer):
         attn_mask = None
         """if self.causal:
             attn_mask = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), diagonal=1)"""
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+
+        return self.out(attn)
+
+
+class MultiheadLatentAttentionMixer(Layer):
+    __name__ = "MultiheadLatentAttentionMixer"
+    __complexity__ = "O(L^2 d * d_kv_lora)"
+
+    def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False):
+        super().__init__()
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.d_kv_lora = d_kv_lora
+
+        self.q = nn.Linear(d_model, d_model, bias=False)
+
+        self.kv_compress = nn.Linear(d_model, d_kv_lora + d_model // n_heads, bias=False)
+
+        self.k_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
+        self.v_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
+
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        q = self.q(x).reshape(B, L, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, L, d_h)
+
+        kv_compressed = self.kv_compress(x)  # (B, L, d_kv_lora + d_h)
+        k_latent, v_pe = kv_compressed.split([self.d_kv_lora, self.head_dim], dim=-1)
+
+        k = self.k_decompress(k_latent).reshape(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_decompress(k_latent).reshape(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if self.rope is not None:
+            q_rope = q + v_pe.unsqueeze(1)
+            k, q_rope = self.rope(q_rope, k)
+            q = q_rope
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
@@ -1272,7 +1345,7 @@ if __name__ == "__main__":
         'n_heads': 8,
         'causal': True
     }
-    sec_mixer = CausalConv1d
+    sec_mixer = DepthwiseCausalConv1d
     sec_params = {
         'k': 3
     }
