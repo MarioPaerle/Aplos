@@ -294,6 +294,18 @@ class Identity(Layer):
         return x
 
 
+class IdentityMixer(Layer):
+    __name__ = "Identity"
+    __complexity__ = "O(1)"
+
+    def __init__(self, d_model):
+        super(IdentityMixer, self).__init__()
+        self.d_model = d_model
+
+    def forward(self, x):
+        return x
+
+
 class LPadder(Layer):
     __name__ = "LPadder"
     __complexity__ = "O(k d)"

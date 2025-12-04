@@ -766,13 +766,13 @@ class SequenceModel(Layer):
 
         if self.pad == 'sqrt':
             n = int((x.shape[1] ** 0.5) + 0.999999)
-            x = F.pad(x, (0, 0, 0, n ** 2 - x.shape[1]), mode="constant", value=self.element)
+            x = F.pad(x, (0, 0, 0, n**2 - x.shape[1]), mode="constant", value=self.element)
         else:
             pass
 
         for block in self.blocks:
             x = block(x)
-        # x = self.norm(x)
+
         if unembed:
             x = self.unembedder(x)
 
