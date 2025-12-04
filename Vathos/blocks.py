@@ -63,7 +63,7 @@ class CausalConv1d(Layer):
 
     def __init__(self, d_model, k=3, groups=None, outproj=False):
         super().__init__()
-        self.d = d_model
+        self.d_model = d_model
         self.k = k
         self.pad = k - 1
         self.groups = groups if groups is not None else d_model
@@ -75,7 +75,6 @@ class CausalConv1d(Layer):
         self.K = nn.Parameter(torch.randn(d_model, k) / (k ** 0.5))
 
     def forward(self, x):
-        b, L, d = x.shape
         x = x.transpose(1, 2)
         x_pad = F.pad(x, (self.pad, 0))
         out = F.conv1d(x_pad, self.K.unsqueeze(1), groups=self.groups)

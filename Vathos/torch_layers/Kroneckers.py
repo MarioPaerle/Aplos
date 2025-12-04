@@ -126,6 +126,8 @@ kronecker_batch_matmul_diagonal = _kronecker_batch_matmul_diagonal_einsum
 
 
 class KroneckerMixer1(Layer):
+    __name__ = "KroneckerMixer1"
+    __complexity__ = 'O(sqrt(L) L)'
     def __init__(self, d_model, max_len):
         super().__init__()
         self.max_len = max_len
@@ -144,10 +146,7 @@ class KroneckerMixer1(Layer):
         return A, Bp
 
     def single_level(self, X, A, B, Ap, Bp):
-        Y1 = _kronecker_batch_matmul_einsum(A, B, X)
-        Y2 = _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
-
-        Y = Y1 + Y2
+        Y = _kronecker_batch_matmul_einsum(A, B, X) + _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
         return Y
 
     def forward(self, X):
