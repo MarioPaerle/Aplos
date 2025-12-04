@@ -128,6 +128,7 @@ kronecker_batch_matmul_diagonal = _kronecker_batch_matmul_diagonal_einsum
 class KroneckerMixer1(Layer):
     __name__ = "KroneckerMixer1"
     __complexity__ = 'O(sqrt(L) L)'
+
     def __init__(self, d_model, max_len):
         super().__init__()
         self.max_len = max_len
@@ -161,7 +162,46 @@ class KroneckerMixer1(Layer):
 
         Y = self.single_level(Y, A, B, Ap, Bp)  # + Y
 
-        return Y# [:, :L, :]
+        return Y  # [:, :L, :]
+
+
+class KroneckerMixer2(Layer):
+    __name__ = "KroneckerMixer1"
+    __complexity__ = 'O(sqrt(L) L)'
+
+    def __init__(self, d_model, max_len, k=3):
+        super().__init__()
+        self.max_len = max_len
+        self.d_model = d_model
+        nmax = int((max_len ** 0.5) + 1)
+        self.nmax = nmax
+
+        self.As = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.Bs = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.Aps = nn.Parameter(torch.randn(nmax) * 0.02)
+        self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.conv = CausalConv1d(k=k, d_model=self.d_model)
+        self.gate = nn.Linear(d_model, d_model)
+
+    def _mask_params(self, A, Bp):
+        A = torch.tril(A, diagonal=-1)
+        Bp = torch.tril(Bp)
+        return A, Bp
+
+    def single_level(self, X, A, B, Ap, Bp):
+        Y = _kronecker_batch_matmul_einsum(A, B, X) + _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
+        return Y
+
+    def forward(self, X):
+        B, L, d = X.shape
+        n = int((L ** 0.5) + 0.999999)
+        B = self.Bs[:n, :n]
+        Ap = self.Aps[:n]
+        A, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
+        g = torch.sigmoid(self.gate(X))
+        X = self.single_level(self.conv(X), A, B, Ap, Bp) * g + (1 - g) * X
+
+        return X  # [:, :L, :]
 
 
 if __name__ == '__main__':
