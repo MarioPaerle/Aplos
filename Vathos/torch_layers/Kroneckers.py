@@ -1,3 +1,5 @@
+import torch
+
 from Vathos.blocks import *
 
 
@@ -160,7 +162,7 @@ class KroneckerMixer1(Layer):
         Bp = self.Bps[:n, :n]
         A, Bp = self._mask_params(A, Bp)
 
-        Y = self.single_level(Y, A, B, Ap, Bp)  # + Y
+        Y = self.single_level(Y, A, B, Ap, Bp)  + Y
 
         return Y  # [:, :L, :]
 
@@ -202,6 +204,56 @@ class KroneckerMixer2(Layer):
         X = self.single_level(self.conv(X), A, B, Ap, Bp) * g + (1 - g) * X
 
         return X  # [:, :L, :]
+
+
+class QKVKroneckerMixer(Layer):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, max_len=2116):
+        super().__init__()
+        self.causal = causal
+        self.max_len = max_len
+        self.d_model = d_model
+        nmax = int((max_len ** 0.5) + 1)
+        self.nmax = nmax
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+        self.As = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.Bs = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.Aps = nn.Parameter(torch.randn(nmax) * 0.02)
+        self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+
+    def _mask_params(self, A, Bp):
+        A = torch.tril(A, diagonal=-1)
+        Bp = torch.tril(Bp)
+        return A, Bp
+
+    def single_level(self, X, A, B, Ap, Bp):
+        Y = _kronecker_batch_matmul_einsum(A, B, X) + _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
+        return Y
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.d_model)
+        q, k, v = torch.chunk(qkv, 3, -1)
+        B, L, d = x.shape
+        n = int((L ** 0.5) + 0.999999)
+        B = self.Bs[:n, :n]
+        Ap = self.Aps[:n]
+        A, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
+        X = self.single_level(torch.relu(k)*torch.relu(v), A, B, Ap, Bp)*q
+
+        return self.out(X)
 
 
 if __name__ == '__main__':
