@@ -447,6 +447,20 @@ class Embedder(Layer):
         return self.embedding(x)
 
 
+class EasyEmbedder(Layer):
+    __name__ = "SymbolicEmbedder"
+    __complexity__ = "O(L d)"
+
+    def __init__(self, vocab_size, d_model: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.embedding = nn.Embedding(vocab_size, d_model)
+
+    def forward(self, x):
+        return self.embedding(x)
+
+
 class HybridAttentionBlock1d(Layer):
     def __init__(self, d_model, sec_mixer, sec_params, attn_params, n_attn=1, n_sec=3,
                  channel_mixer=MLP, channel_params=None):
@@ -766,7 +780,7 @@ class SequenceModel(Layer):
 
         if self.pad == 'sqrt':
             n = int((x.shape[1] ** 0.5) + 0.999999)
-            x = F.pad(x, (0, 0, 0, n**2 - x.shape[1]), mode="constant", value=self.element)
+            x = F.pad(x, (0, 0, 0, n ** 2 - x.shape[1]), mode="constant", value=self.element)
         else:
             pass
 
