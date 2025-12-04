@@ -1,5 +1,6 @@
 """
-All the layers included here aim to be already optimized by torch itself, without requiring triton/cuda kernels (explicitly)
+All the layers included here aim to be already optimized by torch itself, without requiring triton/cuda kernels (explicitly),
+in fact they try to only use matmul and Linear operations which are arguably already optimized implicitly in torch.
 """
 
 from Vathos._basics import *
@@ -684,6 +685,7 @@ class SequenceModel(Layer):
         if embedder_args is None:
             embedder_args = {}
 
+        self.pipe = {}
         self.name = name
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
@@ -758,7 +760,10 @@ class SequenceModel(Layer):
         x = self.embedder(x) * math.sqrt(self.d_model)
         x = self.pos_encoder(x)
         for block in self.blocks:
-            x = block(x)
+            if hasattr(type(block), '__piped__'):
+                x = block(x, self.pipe)
+            else:
+                x = block(x)
         x = self.norm(x)
         if unembed:
             x = self.unembedder(x)

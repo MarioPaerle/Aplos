@@ -75,10 +75,7 @@ def power_weigthed_cumsum(x, a=0.999, rescale=True):
     else:
         raise RuntimeError("x shapes mus be of form [B, L, d] or [B, L, d, d]")
 
-    z = x / alpha_pow
-    z[:, alpha_pow[0, :, 0] < 0.01, :] = z  # TODO: This must be fixed
-    # alpha_pow[alpha_pow < 0.0001] = 1
-    return torch.cumsum(z, dim=1) * alpha_pow * (alpha_pow[:, 0, ...] if rescale else 1)
+    return torch.cumsum(x / alpha_pow, dim=1) * alpha_pow * (alpha_pow[:, 0, ...] if rescale else 1)
 
 
 def precompute_power_weigthed_cumsum(x, alpha_pow):

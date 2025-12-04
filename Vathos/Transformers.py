@@ -1,8 +1,8 @@
+"""Basic Implementation of Famous Transformers Model using Vathos blocks SequenceModel.
+serves firstly as an example on how to build with Vathos SequenceModel"""
+
 from Vathos.blocks import *
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Callable
-import math
 from Vathos.functions import *
 
 
