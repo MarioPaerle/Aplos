@@ -437,7 +437,7 @@ class DLPGelu(Layer):
     def __init__(self, d_model, expand):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand, bias=True)
-        self.contract = nn.Linear(d_model * d_model, d_model, bias=True)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=True)
 
     def forward(self, x):
         return self.contract(F.gelu(self.expand(x)))
