@@ -433,6 +433,16 @@ class MLP(Layer):
         return self.layers(x)
 
 
+class DLPGelu(Layer):
+    def __init__(self, d_model, expand):
+        super().__init__()
+        self.expand = nn.Linear(d_model, d_model * expand, bias=True)
+        self.contract = nn.Linear(d_model * d_model, d_model, bias=True)
+
+    def forward(self, x):
+        return self.contract(F.gelu(self.expand(x)))
+
+
 class ResMLPBlock(Layer):
     def __init__(self, d_model, expand=2, norm=True, activation: Callable = nn.GELU):
         super().__init__()
