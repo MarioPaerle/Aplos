@@ -111,22 +111,26 @@ class KroneckerMixer1(Layer):
         Bp = torch.tril(Bp)
         return A, Bp
 
-    @staticmethod
-    # @torch.compile
-    def single_level(X, A, B, Ap, Bp):
-        Y1 = kronecker_batch_matmul(A, B, X)
-        Y2 = kronecker_batch_matmul_diagonal(Ap, Bp, X)
+    def single_level(self, X, A, B, Ap, Bp):
+        Y1 = _kronecker_batch_matmul_einsum(A, B, X)
+        Y2 = _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
 
         Y = Y1 + Y2
         return Y
 
     def forward(self, X):
         B, L, d = X.shape
+        Y = X
         n = int((L ** 0.5) + 0.999999)
+        A = self.As[:n, :n]
+        B = self.Bs[:n, :n]
+        Ap = self.Aps[:n]
+        Bp = self.Bps[:n, :n]
+        A, Bp = self._mask_params(A, Bp)
 
-        Y = self.single_level(X, *self._mask_params(self.As[:n, :n], self.Bs[:n, :n]), self.Aps[:n], self.Bps[:n, :n])
+        Y = self.single_level(Y, A, B, Ap, Bp)  # + Y
 
-        return Y  # [:, :L, :]
+        return Y[:, :L, :]
 
 if __name__ == '__main__':
     X = torch.randint(0, 10, (2, 1024))
@@ -141,8 +145,8 @@ if __name__ == '__main__':
         unembedder=UnbiasedLinear,
         channel_mixer=MLP,
         channel_args={"expand": 2, "depth": 2, "activation": nn.GELU},
-        spatial_mixer=KroneckerMixer1,
-        spatial_args={'max_len':1024}
+        spatial_mixer=MultiheadAttentionMixer,
+        spatial_args={'n_heads': 8, 'causal':True}
     )
     pad = LSqrtPadder()
     unpad = LSqrtUnPadder()
