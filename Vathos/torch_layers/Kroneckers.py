@@ -181,10 +181,6 @@ if __name__ == '__main__':
         spatial_mixer=MultiheadAttentionMixer,
         spatial_args={'n_heads': 8, 'causal': True}
     )
-    pad = LSqrtPadder()
-    unpad = LSqrtUnPadder()
-    model.insert_block(0, pad)
-    model.append(unpad)
     model.summary()
     out = model(X)
     model.profile(plot=True, plot_level=1)
