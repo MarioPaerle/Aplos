@@ -735,6 +735,7 @@ class SequenceModel(Layer):
         self.spatial_complextiy = spatial_mixer.__complexity__ if hasattr(spatial_mixer, "__complexity__") else "O(L d)"
         self.channel_complexity = channel_mixer.__complexity__ if hasattr(channel_mixer, "__complexity__") else "O(L d)"
         self.runned = False
+        self.embed_scale = math.sqrt(d_model)
         self._init_weights()
 
     def _init_weights(self):
@@ -774,13 +775,13 @@ class SequenceModel(Layer):
                             module.weight.data *= depth_scale
 
     def forward(self, x: torch.LongTensor, unembed=True):
-        B, L = x.shape
-        x = self.embedder(x) * math.sqrt(self.d_model)
+        B, L = x.size(0), x.size(1)
+        x = self.embedder(x) * self.embed_scale
         x = self.pos_encoder(x)
 
         if self.pad == 'sqrt':
             n = int((x.shape[1] ** 0.5) + 0.999999)
-            x = F.pad(x, (0, 0, 0, n ** 2 - x.shape[1]), mode="constant", value=self.element)
+            x = F.pad(x, (0, 0, 0, n ** 2 - L), mode="constant", value=0)
         else:
             pass
 

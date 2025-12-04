@@ -162,7 +162,7 @@ class KroneckerMixer1(Layer):
 
         Y = self.single_level(Y, A, B, Ap, Bp)  # + Y
 
-        return Y[:, :L, :]
+        return Y# [:, :L, :]
 
 
 if __name__ == '__main__':
