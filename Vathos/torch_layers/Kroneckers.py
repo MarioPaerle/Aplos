@@ -71,7 +71,7 @@ class LSqrtPadder(Layer):
     def forward(self, x, pipe):
         n = int((x.shape[1] ** 0.5) + 0.999999)
         pipe['original_L'] = x.shape[1]
-        return F.pad(x, (0, 0, 0, x.shape[1] - n**2), mode="constant", value=self.element)
+        return F.pad(x, (0, 0, 0, n ** 2 - x.shape[1]), mode="constant", value=self.element)
 
 
 class LSqrtUnPadder(Layer):
@@ -87,6 +87,38 @@ class LSqrtUnPadder(Layer):
     def forward(self, x, pipe):
         L = pipe['original_L']
         return x[:, :L, :]
+
+
+class SqPadEmbedder(Layer):
+    __name__ = "SqPadEmbedder"
+
+    def __init__(self, vocab_size, d_model):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.padder = LSqrtPadder()
+        self.embedder = Embedder(vocab_size, d_model)
+
+    def forward(self, x):
+        x = self.embedder(x)
+        x = self.padder(x)
+        return x
+
+
+class SqPadUnembedder(Layer):
+    __name__ = "SqPadEmbedder"
+
+    def __init__(self, vocab_size, d_model):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.unpadder = LSqrtUnPadder()
+        self.unembedder = Embedder(vocab_size, d_model)
+
+    def forward(self, x):
+        x = self.unpadder(x)
+        x = self.unembedder(x)
+        return x
 
 
 kronecker_batch_matmul = _kronecker_batch_matmul_einsum
@@ -132,6 +164,7 @@ class KroneckerMixer1(Layer):
 
         return Y[:, :L, :]
 
+
 if __name__ == '__main__':
     X = torch.randint(0, 10, (2, 1024))
 
@@ -146,7 +179,7 @@ if __name__ == '__main__':
         channel_mixer=MLP,
         channel_args={"expand": 2, "depth": 2, "activation": nn.GELU},
         spatial_mixer=MultiheadAttentionMixer,
-        spatial_args={'n_heads': 8, 'causal':True}
+        spatial_args={'n_heads': 8, 'causal': True}
     )
     pad = LSqrtPadder()
     unpad = LSqrtUnPadder()

@@ -669,9 +669,11 @@ class SequenceModel(Layer):
                  channel_args: dict = None,
                  spatial_args: dict = None,
                  rope=False,
-                 name=''
+                 name='',
+                 pad='none'
                  ):
         super().__init__()
+        self.pad = pad
         if rope and spatial_mixer is not MultiheadAttentionMixer:
             flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
         if channel_args is None and channel_mixer is MLP:
@@ -709,6 +711,7 @@ class SequenceModel(Layer):
             )
             for _ in range(n_layers)
         ])
+        self._piped_blocks = None
 
         self.norm = nn.LayerNorm(d_model)
         self.unembedder = unembedder(d_model, vocab_size)
@@ -717,7 +720,7 @@ class SequenceModel(Layer):
         self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"
         self.spatial_complextiy = spatial_mixer.__complexity__ if hasattr(spatial_mixer, "__complexity__") else "O(L d)"
         self.channel_complexity = channel_mixer.__complexity__ if hasattr(channel_mixer, "__complexity__") else "O(L d)"
-
+        self.runned = False
         self._init_weights()
 
     def _init_weights(self):
@@ -757,17 +760,23 @@ class SequenceModel(Layer):
                             module.weight.data *= depth_scale
 
     def forward(self, x: torch.LongTensor, unembed=True):
+        B, L = x.shape
         x = self.embedder(x) * math.sqrt(self.d_model)
         x = self.pos_encoder(x)
+
+        if self.pad == 'sqrt':
+            n = int((x.shape[1] ** 0.5) + 0.999999)
+            x = F.pad(x, (0, 0, 0, n ** 2 - x.shape[1]), mode="constant", value=self.element)
+        else:
+            pass
+
         for block in self.blocks:
-            if hasattr(type(block), '__piped__'):
-                x = block(x, self.pipe)
-            else:
-                x = block(x)
-        x = self.norm(x)
+            x = block(x)
+        # x = self.norm(x)
         if unembed:
             x = self.unembedder(x)
-        return x
+
+        return x[:, :L, :]
 
     def insert_block(self, idx, module):
         self.blocks.insert(idx, module)
