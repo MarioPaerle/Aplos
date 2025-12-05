@@ -162,13 +162,13 @@ class KroneckerMixer1(Layer):
         Bp = self.Bps[:n, :n]
         A, Bp = self._mask_params(A, Bp)
 
-        Y = self.single_level(Y, A, B, Ap, Bp)  + Y
+        Y = self.single_level(Y, A, B, Ap, Bp) + Y
 
         return Y  # [:, :L, :]
 
 
 class KroneckerMixer2(Layer):
-    __name__ = "KroneckerMixer1"
+    __name__ = "KroneckerMixer2"
     __complexity__ = 'O(sqrt(L) L)'
 
     def __init__(self, d_model, max_len, k=3):

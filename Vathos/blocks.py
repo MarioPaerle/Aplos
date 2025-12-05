@@ -713,7 +713,6 @@ class VathosModel(Layer):
             self.checkpoints += 1
             self.save_state_dict(f'{self.name}-checkpoint-{self.checkpoints}.pt')
 
-
     def save_state_dict(self, path):
         torch.save(self.state_dict(), path)
 
@@ -725,15 +724,13 @@ class VathosModel(Layer):
             label="Losses", linewidth=1)
         plt.plot(
             list(self._losses_per_epoch_dict.keys()),
-                 list(self._losses_per_epoch_dict.values()),
-                 label="Losses Per Epoch", linewidth=2)
-
+            list(self._losses_per_epoch_dict.values()),
+            label="Losses Per Epoch", linewidth=2)
 
         plt.xlabel("steps")
         plt.ylabel("loss")
         plt.title("Model Losses per Steps")
         plt.show()
-
 
 
 ########################################################################################################################
@@ -1390,9 +1387,7 @@ if __name__ == "__main__":
     model.autosave = False
     for epoch in range(50):
         for fake in range(150):
-            model.register_loss(1/(epoch + 1) * 1/(fake+1))
+            model.register_loss(1 / (epoch + 1) * 1 / (fake + 1))
         model.register_epoch()
 
     model.plot_losses()
-
-
