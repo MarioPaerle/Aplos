@@ -2,6 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import time
+import numpy as np
 
 try:
     from colorama import Fore
@@ -233,4 +234,42 @@ def benchmark_ar_symbolic_model(model, n, input_shape):
     plt.legend()
     plt.grid(True)
     plt.show()
+
+
+def toeplitz_init(tensor: torch.Tensor, alpha: float, causal: bool = True, mul=0.1):
+    """
+    Initializes a square 2D tensor to a custom Toeplitz matrix with decaying kernels
+    generated from alpha^t for t=1...L, where L is the side length of the matrix.
+
+    If causal is True, the matrix is lower triangular (tril), containing values only
+    where row index i >= column index j.
+
+    Args:
+        tensor (torch.Tensor): The square 2D tensor to initialize in place.
+        alpha (float): The base for the exponential decay.
+        causal (bool, optional): If True, makes the matrix lower triangular. Defaults to False.
+
+    Returns:
+        torch.Tensor: The initialized tensor (modified in place).
+    """
+    if tensor.dim() != 2 or tensor.size(0) != tensor.size(1):
+        raise ValueError("Tensor must be a square 2D tensor.")
+
+    L = tensor.size(0)
+    i, j = torch.meshgrid(
+        torch.arange(L, device=tensor.device, dtype=tensor.dtype),
+        torch.arange(L, device=tensor.device, dtype=tensor.dtype),
+        indexing='ij'
+    )
+    dist = torch.abs(i - j)
+    t = dist + 1
+    matrix = alpha ** t
+
+    if causal:
+        matrix = torch.where(i >= j, matrix, torch.tensor(0.0, dtype=tensor.dtype, device=tensor.device))
+
+    with torch.no_grad():
+        tensor.copy_(matrix)
+
+    return tensor * mul
 
