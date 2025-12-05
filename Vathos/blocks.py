@@ -488,7 +488,7 @@ class HybridAttentionBlock1d(Layer):
         self.sec_blocks = nn.ModuleList([
             Block1d(
                 channel_mixer=self.channel_mixer(d_model=d_model, **self.channel_params),
-                spatial_mixer=self.sec_mixer(d_model=d_model, **self.attn_params)
+                spatial_mixer=self.sec_mixer(d_model=d_model, **self.sec_params)
             )
             for _ in range(self.n_sec)
         ])
@@ -496,7 +496,7 @@ class HybridAttentionBlock1d(Layer):
     def forward(self, x):
         for sec in self.sec_blocks:
             x = sec(x)
-        for attn in self.attn_mixers:
+        for attn in self.attn_blocks:
             x = attn(x)
         return x
 

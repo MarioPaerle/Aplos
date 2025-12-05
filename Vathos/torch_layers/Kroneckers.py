@@ -259,6 +259,23 @@ class QKVKroneckerMixer(Layer):
 if __name__ == '__main__':
     X = torch.randint(0, 10, (2, 1024))
 
+    hybrid = HybridAttentionBlock1d
+    attn_params = {'n_heads': 8, 'causal': True}
+    kronecker = KroneckerMixer1
+    kronecker_params = {'max_len': 2116}
+    hybrid_params = {
+        'sec_mixer': kronecker,
+        'sec_params': kronecker_params,
+        'attn_params': attn_params,
+        'channel_mixer': DLPGelu,
+        'channel_params': {'expand': 4},
+        'n_attn': 1,
+        'n_sec': 3
+
+    }
+
+
+
     model = SequenceModel(
         vocab_size=10,
         d_model=512,
@@ -269,9 +286,9 @@ if __name__ == '__main__':
         unembedder=UnbiasedLinear,
         channel_mixer=MLP,
         channel_args={"expand": 2, "depth": 2, "activation": nn.GELU},
-        spatial_mixer=MultiheadAttentionMixer,
-        spatial_args={'n_heads': 8, 'causal': True}
+        spatial_mixer=hybrid,
+        spatial_args=hybrid_params,
     )
     model.summary()
     out = model(X)
-    model.profile(plot=True, plot_level=1)
+    model.profile(plot=True, plot_level=5, avg=True)
