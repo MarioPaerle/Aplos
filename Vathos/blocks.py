@@ -2,6 +2,7 @@
 All the layers included here aim to be already optimized by torch itself, without requiring triton/cuda kernels (explicitly),
 in fact they try to only use matmul and Linear operations which are arguably already optimized implicitly in torch.
 """
+import torch
 
 from Vathos._basics import *
 from typing import Tuple, Optional, Union, List
@@ -653,14 +654,86 @@ class VathosModel(Layer):
     def __init__(self):
         super().__init__()
 
-    def forward(self):
-        pass
+        # LOSSES and METRICS
+        self._losses = []
+        self._losses_dict = {}
+        self._losses_per_epoch = []
+        self._losses_per_epoch_dict = {}
+        self._losses_this_epoch = []
+        self._metrics = dict()
+        self._metrics_this_epoch = dict()
+        self._metrics_per_epoch = dict()
+        self.autosave = True
+        self.best_loss = float('inf')
+        self.checkpoints = 0
+        self.steps = 0
+        self.steps_per_epoch = 0
 
-    def summary(self):
-        pass
+    def flag_not_training(self):
+        if not self.training:
+            flag("You are not training")
 
-    def computecomplexity(self):
-        pass
+    def register_loss(self, loss: float):
+        self._losses_dict[self.steps] = loss
+        self._losses.append(loss)
+        self._losses_this_epoch.append(loss)
+        self.steps += 1
+
+    def get_last_loss(self):
+        return self._losses[-1]
+
+    def get_mean_loss(self, epoch=True):
+        if epoch:
+            return np.mean(self._losses_this_epoch)
+        else:
+            return np.mean(self._losses)
+
+    def register_metrics(self, metrics: dict):
+        for metric in metrics:
+            if metric in self._metrics:
+                self._metrics[metric].append(metrics[metric])
+                self._metrics_this_epoch[metric].append(metrics[metric])
+            else:
+                flag(f"Registring a new metric {metric}")
+                self._metrics[metric] = [metrics[metric]]
+                self._metrics_this_epoch[metric] = [metrics[metric]]
+
+    def register_epoch(self):
+        self._losses_per_epoch.append(np.mean(self._losses_this_epoch))
+        self._losses_per_epoch_dict[self.steps] = np.mean(self._losses_this_epoch)
+        self._losses_this_epoch = []
+        for metric in self._metrics_this_epoch:
+            if metric in self._metrics_per_epoch:
+                self._metrics_per_epoch[metric].append(np.mean(self._metrics_this_epoch[metric]))
+                self._metrics_this_epoch[metric] = []
+            else:
+                pass
+
+        if self._losses_per_epoch[-1] < self.best_loss and self.autosave:
+            self.checkpoints += 1
+            self.save_state_dict(f'{self.name}-checkpoint-{self.checkpoints}.pt')
+
+
+    def save_state_dict(self, path):
+        torch.save(self.state_dict(), path)
+
+    def plot_losses(self):
+        print(self.steps_per_epoch)
+        plt.plot(
+            list(self._losses_dict.keys()),
+            list(self._losses_dict.values()),
+            label="Losses", linewidth=1)
+        plt.plot(
+            list(self._losses_per_epoch_dict.keys()),
+                 list(self._losses_per_epoch_dict.values()),
+                 label="Losses Per Epoch", linewidth=2)
+
+
+        plt.xlabel("steps")
+        plt.ylabel("loss")
+        plt.title("Model Losses per Steps")
+        plt.show()
+
 
 
 ########################################################################################################################
@@ -668,7 +741,7 @@ class VathosModel(Layer):
 ########################################################################################################################
 
 
-class SequenceModel(Layer):
+class SequenceModel(VathosModel):
     __name__ = "SequenceModel"
 
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
@@ -1304,15 +1377,22 @@ if __name__ == "__main__":
         'sec_params': sec_params,
         'attn_params': attn_params
     }
-    model = SequenceModel(10, 256, 6, 256, pos_encoder=True,
+    model = SequenceModel(10, 12, 3, 64, pos_encoder=True,
                           embedder=Embedder, unembedder=UnbiasedLinear, rope=False,
                           spatial_mixer=LinearMixer,
-                          spatial_args={'max_len': 256})
-    model.insert_block(0, LPadder(right=10))
-    model.append(LUnPadder(right=10))
+                          spatial_args={'max_len': 100})
     out = model(x).detach()
     plt.imshow(out[0])
     plt.show()
     model.summary()
     model.profile()
     model.profile(avg=True)
+    model.autosave = False
+    for epoch in range(50):
+        for fake in range(150):
+            model.register_loss(1/(epoch + 1) * 1/(fake+1))
+        model.register_epoch()
+
+    model.plot_losses()
+
+
