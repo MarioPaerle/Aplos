@@ -225,10 +225,10 @@ class QKVKroneckerMixer(Layer):
         else:
             self.rope = None
 
-        self.As = nn.Parameter(torch. empty(nmax, nmax) * 0.02, requires_grad=False)
-        self.Bs = nn.Parameter(torch. empty(nmax, nmax) * 0.02)
-        self.Aps = nn.Parameter(torch.empty(nmax) * 0.02)
-        self.Bps = nn.Parameter(torch.empty(nmax, nmax) * 0.02)
+        self.As = nn.Parameter(torch. empty(nmax, nmax), requires_grad=False)
+        self.Bs = nn.Parameter(torch. randn(nmax, nmax) * 0.02)
+        self.Aps = nn.Parameter(torch.randn(nmax) * 0.02)
+        self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
 
         toeplitz_init(self.As, 0.95)
         toeplitz_init(self.Aps, 0.95)
