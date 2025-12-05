@@ -231,9 +231,6 @@ class QKVKroneckerMixer(Layer):
         self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
 
         toeplitz_init(self.As, 0.95)
-        toeplitz_init(self.Aps, 0.95)
-        toeplitz_init(self.Bs, 0.95)
-        toeplitz_init(self.Bps, 0.95)
 
     def _mask_params(self, A, Bp):
         A = torch.tril(A, diagonal=-1)
