@@ -9,8 +9,11 @@ Aditionally (its useful i swear) one can download colorama via
 
 `pip install colorama`
 
+and APLOS will automatically become colorful!
+
 ![logo.png](logo.png)
 
+---
 
 # Vathos
 Vathos is a python library built on PyTorch whose aim is to accelerate the building of good level models for researchers, 
@@ -18,8 +21,6 @@ exploiting the repeating structure of Deep Learning architectures.
 
 I'm making this library firstly for my self, since I felt I needed an easier way, to implement famous architectures, with a high grade
 of customization, across all of my project, creating a sort of standard.
-
-and APLOS will automatically become colorful!
 
 > [!WARNING]
 > This library is just born, I don't even started writing the documentation, and has plenty of bug, just wait until its **stable**.
