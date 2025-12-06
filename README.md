@@ -1,13 +1,23 @@
 # APLOS 
-_version = alpha-0.0.2_  - - - - **unstable**
+> [!NOTE]
+> _version = alpha-0.0.2_  - - - - **unstable**
 
-[WARNING] This library is just born, no documentation can be found, and has plenty of bug, just wait until its **stable**.
+Vathos is a python library built on PyTorch whose aim is to accelerate the building of good level models for researchers, 
+exploiting the repeating structure of Deep Learning architectures.
+
+I'm making this library firstly for my self, since I felt I needed an easier way, to implement famous architectures, with a high grade
+of customization, across all of my project, creating a sort of standard.
+
+![logo.png](logo.png)
+
+> [!WARNING]
+> This library is just born, I don't even started writing the documentation, and has plenty of bug, just wait until its **stable**.
 
 
 I started building this collection of specific libraries to help myself with prototyping
 new deep learning architettures.
 
-### Easy install it via pip:
+## Easy install it via pip:
 `pip install -q git+https://github.com/MarioPaerle/Aplos.git`
 
 Aditionally (its useful i swear) one can download colorama via 
@@ -21,11 +31,17 @@ and APLOS will automatically become colorful!
 # To Start
 Here's a simple implementation of an AR (Causal) Transformer:
 
-```
+```python
 from Vathos.blocks import *
 channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
-model = SequenceModel(vocab_size=VOCAB_SIZE, d_model=D_MODEL, n_layers=6, max_len=2048,
-                               pos_encoder=True, rope=False, channel_args=channel_args).to(device)
+model = SequenceModel(vocab_size=VOCAB_SIZE, 
+                      d_model=D_MODEL, 
+                      n_layers=6, 
+                      max_len=2048,
+                      pos_encoder=True, 
+                      rope=False, 
+                      channel_args=channel_args
+                      ).to(device)
 ```
 This will give you a Vathos Layer object, which is actually a nn.Module object, which will easily adapt to your existing code, since it 
 behave exaclty as a torch object.
