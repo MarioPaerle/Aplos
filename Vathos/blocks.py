@@ -116,7 +116,7 @@ class CausalConv1d(Layer):
 
 class LSTM(Layer):
     __name__ = "LSTM"
-    __complexity__ = "O(L d)"
+    __complexity__ = "O(L d^2)"
 
     def __init__(self, d_model, d_hidden, bidirectional=False, dropout=0.1, n_layer=1):
         super().__init__()
@@ -135,7 +135,7 @@ class LSTM(Layer):
 
 class GRU(Layer):
     __name__ = "GRU"
-    __complexity__ = "O(L d)"
+    __complexity__ = "O(L d^2)"
 
     def __init__(self, d_model, d_hidden, bidirectional=False, dropout=0.1, n_layer=1):
         super().__init__()
@@ -292,7 +292,7 @@ class SinusoidalPositionalEncoding(Layer):
 
 class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d^2)"
+    __complexity__ = "O(L^2 d +  L d^2)"
 
     def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.1):
         super().__init__()
@@ -331,7 +331,7 @@ class MultiheadAttentionMixer(Layer):
 
 class MultiheadLatentAttentionMixer(Layer):
     __name__ = "MultiheadLatentAttentionMixer"
-    __complexity__ = "O(L^2 d * d_kv_lora)"
+    __complexity__ = "O(L^2 d + L d * d_kv_lora)"
 
     def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False, droupout=0.1):
         super().__init__()
@@ -381,6 +381,7 @@ class MultiheadLatentAttentionMixer(Layer):
 
 class CausalMultiheadAttentionMixer(Layer):
     __name__ = "CausalMultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d +  L d^2)"
 
     def __init__(self, d_model: int, n_heads: int, causal=True, rope=False, dropout=0.1):
         super().__init__()
