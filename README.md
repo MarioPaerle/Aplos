@@ -2,6 +2,7 @@
 > [!NOTE]
 > _version = alpha-0.0.2_  - - - - **unstable**
 
+_"Aplos from greek απλός (simple), Vathos from greek βάθος, for Deep, and Eidos εἶδος from (information, concept)"_
 ## Easy install it via pip:
 `pip install -q git+https://github.com/MarioPaerle/Aplos.git`
 
