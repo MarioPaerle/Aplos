@@ -400,7 +400,7 @@ class MLP(Layer):
     __name__ = "MLP"
     __complexity__ = "O(depth L d)"
 
-    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable, dropout: 0.1):
+    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable, dropout=0.1):
         super().__init__()
         hidden_dim = d_model * expand
         self.d_model = d_model

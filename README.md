@@ -48,9 +48,17 @@ behave exaclty as a torch object.
 Note that in this example a specific channel mixer is provided 'MLP' and its params are passed via a dict.
 Same thing could0ve been done for the spatial mixer, which by default is a MultiHeadAttention.
 More details are in the DOCU.md file
-> [!NOTE] Please Note that for now Vathos _SequenceModel_ is not ready for efficient inference algorithm, as its native 
+> [!IMPORTANT] 
+> Please Note that for now Vathos _SequenceModel_ is not ready for efficient inference algorithm, as its native 
 > _generate()_ function is simply calling the forward. 
 > KV Caching and other inference acceleration are in plan.
+
+---
+### Vathos Model class uses
+Vathos Model class can be used also to track losses, metrics[WIP] and has a built-in profiling system.
+Each Vathos Layer automatically keeps track of its timing internally, and can access to sublayers timers.
+
+
 ---
 ### FLA Integration Example
 
