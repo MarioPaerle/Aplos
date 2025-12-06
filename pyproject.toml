@@ -9,7 +9,7 @@ description = "Easy Research Level models"
 dependencies = [
     "torch>=2.0",
     "numpy",
-    "matplotlib<=3.9",
+    "matplotlib<=3.9"
 ]
 
 [tool.setuptools.packages.find]

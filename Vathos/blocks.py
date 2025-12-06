@@ -31,8 +31,8 @@ class ExpandingBlock1d(Layer):
         super().__init__()
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
-        self.expander = nn.Linear(d_model, d_model*expand, bias=False)
-        self.contractor = nn.Linear(d_model*expand, d_model, bias=False)
+        self.expander = nn.Linear(d_model, d_model * expand, bias=False)
+        self.contractor = nn.Linear(d_model * expand, d_model, bias=False)
         self.norm1 = nn.LayerNorm(spatial_mixer.d_model)
         self.norm2 = nn.LayerNorm(spatial_mixer.d_model)
 
@@ -40,6 +40,23 @@ class ExpandingBlock1d(Layer):
         x = x + self.contractor(self.spatial_mixer(self.norm1(self.expander(x))))
         x = x + self.channel_mixer(self.norm2(x))
         return x
+
+
+class Renamer:
+    def __init__(self, constructor, renames: dict):
+        super().__init__()
+        self.constructor = constructor
+        self.renames = renames
+
+    def __call__(self, *args, **kwargs):
+        renamed_kwargs = {}
+        for key, value in kwargs.items():
+            if key in self.renames:
+                renamed_kwargs[self.renames[key]] = value
+            else:
+                renamed_kwargs[key] = value
+        return self.constructor(*args, renamed_kwargs)
+
 
 
 class BlockStack(Layer):
@@ -936,6 +953,7 @@ class SequenceModel(VathosModel):
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
         print(f"Total Complexity: {NUM}{combine_big_o(complexities)}{RES}")
+
 
 #######################################################################################################################
 
