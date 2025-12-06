@@ -400,14 +400,14 @@ class MLP(Layer):
     __name__ = "MLP"
     __complexity__ = "O(depth L d)"
 
-    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
+    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable, dropout: 0.1):
         super().__init__()
         hidden_dim = d_model * expand
         self.d_model = d_model
         self.depth = depth
         self.expand = expand
         self.activation = activation
-
+        self.dropout = nn.Dropout(dropout)
         layers = []
         for i in range(depth):
             if i == 0:
@@ -430,17 +430,30 @@ class MLP(Layer):
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor):
-        return self.layers(x)
+        return self.dropout(self.layers(x))
 
 
 class DLPGelu(Layer):
-    def __init__(self, d_model, expand):
+    def __init__(self, d_model, expand, dropout=0.1):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand, bias=True)
         self.contract = nn.Linear(d_model * expand, d_model, bias=True)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.contract(F.gelu(self.expand(x)))
+        return self.dropout(self.contract(F.gelu(self.expand(x))))
+
+
+class DLPSwiGLU(Layer):
+    def __init__(self, d_model, expand, dropout=0.1):
+        super().__init__()
+        self.expand = nn.Linear(d_model, d_model * expand, bias=True)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=True)
+        self.activation = SwiGLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
 
 
 class ResMLPBlock(Layer):
@@ -467,12 +480,13 @@ class ResMLPBlock(Layer):
 
 
 class ResMLP(Layer):
-    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable):
+    def __init__(self, d_model: int, depth: int, expand: int, activation: Callable, dropout=0.1):
         super().__init__()
         self.d_model = d_model
         self.depth = depth
         self.expand = expand
         self.activation = activation
+        self.dropout = nn.Dropout(dropout)
 
         layers = []
         for i in range(depth):
@@ -481,7 +495,7 @@ class ResMLP(Layer):
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor):
-        return self.layers(x)
+        return self.dropout(self.layers(x))
 
 
 class ConvResBlock(Layer):

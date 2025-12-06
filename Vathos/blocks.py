@@ -294,7 +294,7 @@ class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d^2)"
 
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False):
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.1):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
@@ -307,6 +307,8 @@ class MultiheadAttentionMixer(Layer):
             self.rope = RoPE(self.head_dim)
         else:
             self.rope = None
+
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
@@ -323,7 +325,7 @@ class MultiheadAttentionMixer(Layer):
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
-
+        attn = self.dropout(attn)
         return self.out(attn)
 
 
@@ -331,7 +333,7 @@ class MultiheadLatentAttentionMixer(Layer):
     __name__ = "MultiheadLatentAttentionMixer"
     __complexity__ = "O(L^2 d * d_kv_lora)"
 
-    def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False):
+    def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False, droupout=0.1):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
@@ -353,6 +355,8 @@ class MultiheadLatentAttentionMixer(Layer):
         else:
             self.rope = None
 
+        self.droupout = nn.Dropout(droupout)
+
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
 
@@ -371,14 +375,14 @@ class MultiheadLatentAttentionMixer(Layer):
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
-
+        attn = self.dropout(attn)
         return self.out(attn)
 
 
 class CausalMultiheadAttentionMixer(Layer):
     __name__ = "CausalMultiheadAttentionMixer"
 
-    def __init__(self, d_model: int, n_heads: int, causal=True):
+    def __init__(self, d_model: int, n_heads: int, causal=True, rope=False, dropout=0.1):
         super().__init__()
         assert causal, \
             ("CausalMultiheadAttentionMixLayer only supports causal=True, "
@@ -389,7 +393,12 @@ class CausalMultiheadAttentionMixer(Layer):
 
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
-        self.rope = RoPE(self.head_dim)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
@@ -397,10 +406,12 @@ class CausalMultiheadAttentionMixer(Layer):
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
-        q, k = self.rope(q, k)
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
         attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
 
         return self.out(attn)
 

@@ -19,7 +19,7 @@ def symbolic_1d_ar_pretokenized_train(model, train_loader, val_loader, optimizer
             steps += 1
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast('cuda'):
                 logits = model(batch_x)  # [B,S,V]
                 loss = criterion(
                     logits[:, :-1, :].reshape(-1, logits.size(-1)),
