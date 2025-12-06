@@ -505,7 +505,6 @@ class EasyEmbedder(Layer):
         self.embedding = nn.Embedding(vocab_size, d_model)
 
     def forward(self, x):
-        time.sleep(0.1)
         return self.embedding(x)
 
 
@@ -712,6 +711,7 @@ class VathosModel(Layer):
         self._metrics_this_epoch = dict()
         self._metrics_per_epoch = dict()
         self.autosave = True
+        self.autosave_overwrite = 0
         self.best_loss = float('inf')
         self.checkpoints = 0
         self.steps = 0
@@ -761,7 +761,10 @@ class VathosModel(Layer):
 
         if self._losses_per_epoch[-1] < self.best_loss and self.autosave:
             self.checkpoints += 1
-            self.save_state_dict(f'{self.name}-checkpoint-{self.checkpoints}.pt')
+            if self.autosave_overwrite:
+                self.save_state_dict(f'{self.name}-checkpoint.pt')
+            else:
+                self.save_state_dict(f'{self.name}-checkpoint-{self.checkpoints}.pt')
 
     def save_state_dict(self, path):
         torch.save(self.state_dict(), path)
