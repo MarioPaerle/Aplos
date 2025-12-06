@@ -40,6 +40,7 @@ model = SequenceModel(vocab_size=VOCAB_SIZE,
                       max_len=2048,
                       pos_encoder=True, 
                       rope=False, 
+                      channel_mixer=MLP,
                       channel_args=channel_args
                       ).to(device)
 ```
