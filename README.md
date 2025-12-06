@@ -71,7 +71,6 @@ model.profile(avg=True, plot=True)
 ```
 ![profiling_example.png](imgs%2Fprofiling_example.png)
 ![profiler_plot.png](imgs%2Fprofiler_plot.png)
-
 ---
 ### FLA Integration Example
 
