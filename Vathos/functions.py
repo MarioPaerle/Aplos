@@ -80,7 +80,6 @@ def holographic_binding(K, V):
     return output
 
 
-
 def power_weigthed_cumsum(x, a=0.999, rescale=True):
     """
     a torch implementation of a power weighted cumsum,
@@ -291,4 +290,3 @@ def toeplitz_init(tensor: torch.Tensor, alpha: float, causal: bool = True, mul=0
         tensor.copy_(matrix)
 
     return tensor * mul
-

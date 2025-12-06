@@ -122,7 +122,7 @@ class HolographicAttentionMixer(nn.Module):
 
         if self.rope is not None:
             q, k = self.rope(q, k)
-        T_vectors = holographic_binding(k, v)
+        T_vectors = batched_channelwise_conv1d(k, v)
         T_vectors = self.norm(T_vectors)
 
         if self.causal:
@@ -132,28 +132,8 @@ class HolographicAttentionMixer(nn.Module):
 
         S_vectors = self.norm(S_vectors)
 
-        attn = holographic_binding(q, S_vectors)
+        attn = batched_channelwise_conv1d(q, S_vectors)
 
         attn = attn.transpose(1, 2).reshape(B, L, D)
 
         return self.out(attn)
-
-
-
-
-if __name__ == '__main__':
-    from Mamba2 import Mamba2Mixer
-    """x = torch.randn(2, 2116, 4)
-    model1 = BaseGatedSummerMixer(4, a=0.95)
-    model2 = BaseGatedSummerMixer(4, a=0.8)
-    y1 = model1(x)
-    y2 = model2(x)
-    plot(x=x[0, :, 0].detach(), y1=y1[0, :, 0].detach(), y2=y2[0, :, 0].detach())"""
-    # test_causality(LinAtt(8))
-    model = SequenceModel(100, 256, 4,
-                          channel_mixer=MLP,
-                          channel_args={"depth": 2, "expand": 2, "activation": nn.ReLU},
-                          spatial_mixer=MultiheadAttentionMixer,
-                          spatial_args={"causal": True, "n_heads": 8})
-    test_causality_symbolic(model)
-    # print(model)
