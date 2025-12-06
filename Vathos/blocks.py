@@ -790,7 +790,8 @@ class SequenceModel(VathosModel):
                  rope=False,
                  name='',
                  pad='none',
-                 baseblock=Block1d
+                 baseblock=Block1d,
+                 baseblock_args=None
                  ):
         super().__init__()
         self.pad = pad
@@ -806,12 +807,15 @@ class SequenceModel(VathosModel):
             channel_args = {}
         if embedder_args is None:
             embedder_args = {}
+        if baseblock_args is None:
+            baseblock_args = {}
 
         self.pipe = {}
         self.name = name
         self.baseblock = baseblock
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
+        self.baseblock_args = baseblock_args
 
         self.spatial_args = spatial_args
         self.channel_args = channel_args
@@ -829,7 +833,8 @@ class SequenceModel(VathosModel):
             self.baseblock(
                 d_model=d_model,
                 channel_mixer=channel_mixer(d_model=d_model, **channel_args),
-                spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args)
+                spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args),
+                **baseblock_args
             )
             for _ in range(n_layers)
         ])

@@ -39,7 +39,7 @@ model = SequenceModel(vocab_size=VOCAB_SIZE,
                       max_len=2048,
                       pos_encoder=True, 
                       rope=False, 
-                      spatial_mixer=MultiheadAttentionMixer,
+                      spatial_mixer=MultiheadAttentionMixer, # This uses FlashAttention by default
                       spatial_args={'n_heads': 8, 'causal':True},
                       channel_mixer=MLP,
                       channel_args={"expand": 2, "activation": SwiGLU, "depth": 2}
