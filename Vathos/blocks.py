@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 
 class Block1d(Layer):
-    def __init__(self, channel_mixer: Layer, spatial_mixer: Layer):
+    def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer):
         super().__init__()
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
@@ -22,6 +22,22 @@ class Block1d(Layer):
 
     def forward(self, x: torch.Tensor):
         x = x + self.spatial_mixer(self.norm1(x))
+        x = x + self.channel_mixer(self.norm2(x))
+        return x
+
+
+class ExpandingBlock1d(Layer):
+    def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, expand=1):
+        super().__init__()
+        self.spatial_mixer = spatial_mixer
+        self.channel_mixer = channel_mixer
+        self.expander = nn.Linear(d_model, d_model*expand, bias=False)
+        self.contractor = nn.Linear(d_model*expand, d_model, bias=False)
+        self.norm1 = nn.LayerNorm(spatial_mixer.d_model)
+        self.norm2 = nn.LayerNorm(spatial_mixer.d_model)
+
+    def forward(self, x: torch.Tensor):
+        x = x + self.contractor(self.spatial_mixer(self.norm1(self.expander(x))))
         x = x + self.channel_mixer(self.norm2(x))
         return x
 
@@ -128,7 +144,7 @@ class LinearMixer(Layer):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
-        self.W = nn.Parameter(torch.randn(max_len, max_len) / max_len)
+        self.W = nn.Parameter(torch.randn(max_len, max_len) * 0.01)
 
     def forward(self, x):
         x = x / math.sqrt(self.d_model)
@@ -380,6 +396,7 @@ class MTransformer(Layer):
 
         self.blocks = nn.ModuleList([
             Block1d(
+                d_model=d_model,
                 channel_mixer=MLP(d_model, depth=2, expand=mlp_expand, activation=SwiGLU),
                 spatial_mixer=CausalMultiheadAttentionMixer(d_model, n_heads, causal=causal)
             )
@@ -668,6 +685,7 @@ class VathosModel(Layer):
         self.checkpoints = 0
         self.steps = 0
         self.steps_per_epoch = 0
+        self.epochs = 0
 
     def flag_not_training(self):
         if not self.training:
@@ -699,6 +717,7 @@ class VathosModel(Layer):
                 self._metrics_this_epoch[metric] = [metrics[metric]]
 
     def register_epoch(self):
+        self.epochs += 1
         self._losses_per_epoch.append(np.mean(self._losses_this_epoch))
         self._losses_per_epoch_dict[self.steps] = np.mean(self._losses_this_epoch)
         self._losses_this_epoch = []
@@ -753,7 +772,8 @@ class SequenceModel(VathosModel):
                  spatial_args: dict = None,
                  rope=False,
                  name='',
-                 pad='none'
+                 pad='none',
+                 baseblock=Block1d
                  ):
         super().__init__()
         self.pad = pad
@@ -772,6 +792,7 @@ class SequenceModel(VathosModel):
 
         self.pipe = {}
         self.name = name
+        self.baseblock = baseblock
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
 
@@ -788,7 +809,8 @@ class SequenceModel(VathosModel):
             (SinusoidalPositionalEncoding(d_model, max_len=max_len) if pos_encoder is True else nn.Identity())
 
         self.blocks = nn.ModuleList([
-            Block1d(
+            self.baseblock(
+                d_model=d_model,
                 channel_mixer=channel_mixer(d_model=d_model, **channel_args),
                 spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args)
             )
@@ -914,303 +936,6 @@ class SequenceModel(VathosModel):
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
         print(f"Total Complexity: {NUM}{combine_big_o(complexities)}{RES}")
-
-
-class BuildableSequenceModel(Layer):
-    __name__ = "SequenceModel"
-
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int,
-                 max_len=1024,
-                 pos_encoder: bool | None | Layer | nn.Module = None,
-                 embedder=Embedder,
-                 embedder_args: dict = None,
-                 unembedder=UnbiasedLinear,
-                 channel_mixer=Builder(MLP),
-                 spatial_mixer: Layer | nn.Module = Builder(MultiheadAttentionMixer),
-                 channel_args: dict = None,
-                 spatial_args: dict = None,
-                 rope=False,
-                 name=''
-                 ):
-        super().__init__()
-        if rope and spatial_mixer.__name__ != 'MultiheadAttentionMixer':
-            flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
-        if channel_args is None and channel_mixer.__name__ != 'MLP':
-            channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
-        if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
-            spatial_args = {"causal": True, "n_heads": 8, "rope": rope}
-        if spatial_args is None:
-            spatial_args = {}
-        if channel_args is None:
-            channel_args = {}
-        if embedder_args is None:
-            embedder_args = {}
-
-        self.name = name
-        self.spatial_mixer = spatial_mixer
-        self.channel_mixer = channel_mixer
-
-        self.spatial_args = spatial_args
-        self.channel_args = channel_args
-        self.vocab_size = vocab_size
-        self.max_len = max_len
-        self.d_model = d_model
-        self.n_layers = n_layers
-
-        self.embedder = embedder(**embedder_args)
-
-        self.pos_encoder = pos_encoder(d_model, max_len=max_len) if pos_encoder not in (True, False, None) else \
-            (SinusoidalPositionalEncoding(d_model, max_len=max_len) if pos_encoder is True else nn.Identity())
-
-        self.blocks = nn.ModuleList([
-            Block1d(
-                channel_mixer=channel_mixer(),
-                spatial_mixer=spatial_mixer()
-            )
-            for _ in range(n_layers)
-        ])
-
-        self.norm = nn.LayerNorm(d_model)
-        self.unembedder = unembedder(d_model, vocab_size)
-
-        self.embedder_complexity = embedder.__complexity__ if hasattr(embedder, "__complexity__") else "O(L d)"
-        self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"
-        self.spatial_complextiy = spatial_mixer.__complexity__ if hasattr(spatial_mixer, "__complexity__") else "O(L d)"
-        self.channel_complexity = channel_mixer.__complexity__ if hasattr(channel_mixer, "__complexity__") else "O(L d)"
-
-        self._init_weights()
-
-    def _init_weights(self):
-        """
-        Initialize weights following GPT-style conventions:
-        - Small std for embeddings
-        - Xavier/Kaiming for linear layers
-        - Scaled initialization for residual projections
-        """
-        std_embed = 0.02
-        try:
-            nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
-        except:
-            pass
-        try:
-            nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
-        except:
-            pass
-
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                std_init = 0.02
-                nn.init.normal_(module.weight, mean=0.0, std=std_init)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-
-        for block_idx, block in enumerate(self.blocks):
-            for name, module in block.named_modules():
-                if isinstance(module, nn.Linear):
-                    depth_scale = (2.0 * self.n_layers) ** -0.5
-                    if 'out' in name.lower() or 'proj' in name.lower() or '.l2' in name or '.g2' in name:
-                        with torch.no_grad():
-                            module.weight.data *= depth_scale
-
-    def forward(self, x: torch.LongTensor, unembed=True):
-        x = self.embedder(x) * math.sqrt(self.d_model)
-        x = self.pos_encoder(x)
-        for block in self.blocks:
-            x = block(x)
-        x = self.norm(x)
-        if unembed:
-            x = self.unembedder(x)
-        return x
-
-    @torch.no_grad()
-    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9,
-                 device='cpu'):
-        self.eval()
-        if prompt.dim() == 1:
-            prompt = prompt.unsqueeze(0)
-
-        generated = prompt.clone().to(device)
-
-        for _ in range(max_length):
-            logits_uncond = self.forward(generated)
-
-            logits = logits_uncond
-            next_token_logits = logits[:, -1, :] / temperature
-
-            sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-            sorted_indices_to_remove[:, 0] = 0
-            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-            next_token_logits[indices_to_remove] = float('-inf')
-
-            probs = F.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            generated = torch.cat([generated, next_token], dim=1)
-
-            if next_token.item() == 0:
-                break
-
-        return generated
-
-    def summary(self):
-        complexities = [self.channel_complexity, self.spatial_complextiy, self.embedder_complexity,
-                        self.unembedder_complexity]
-        print(f'{NUM}VATHOS{RES} Model Summary:')
-        print(f"{NUM}Symbolic1dSeq2SeqModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
-        print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)} - {NUM}{self.embedder_complexity}{RES}")
-        print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)} - {NUM}{self.unembedder_complexity}{RES}")
-        print(
-            f"\t - {NUM}Spatial Mixer{RES}: {getname(self.spatial_mixer)}({self.spatial_args}) - {NUM}{self.spatial_complextiy}{RES}")
-        print(
-            f"\t - {NUM}Channel Mixer{RES}: {getname(self.channel_mixer)}({self.channel_args}) - {NUM}{self.channel_complexity}{RES}")
-        print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
-        print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
-        print(f"Total Complexity: {NUM}{combine_big_o(complexities)}{RES}")
-
-
-class HybridSequenceModel(Layer):
-    __name__ = "SequenceModel"
-
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int,
-                 max_len=1024,
-                 pos_encoder: bool | None | Layer | nn.Module = None,
-                 embedder=Embedder,
-                 embedder_args: dict = None,
-                 unembedder=UnbiasedLinear,
-                 hybrid_block: Layer = HybridAttentionBlock1d,
-                 hybrid_params=None,
-                 name=''
-                 ):
-        super().__init__()
-
-        if embedder_args is None:
-            embedder_args = {}
-        if hybrid_params is None:
-            hybrid_params = {""}
-
-        self.name = name
-        self.vocab_size = vocab_size
-        self.max_len = max_len
-        self.d_model = d_model
-        self.n_layers = n_layers
-
-        self.embedder = embedder(vocab_size=vocab_size, d_model=d_model, **embedder_args)
-
-        self.pos_encoder = pos_encoder(d_model, max_len=max_len) if pos_encoder not in (True, False, None) else \
-            (SinusoidalPositionalEncoding(d_model, max_len=max_len) if pos_encoder is True else nn.Identity())
-
-        self.blocks = nn.ModuleList(
-            [hybrid_block(**hybrid_params) for _ in range(n_layers)]
-        )
-
-        self.norm = nn.LayerNorm(d_model)
-        self.unembedder = unembedder(d_model, vocab_size)
-
-        self.embedder_complexity = embedder.__complexity__ if hasattr(embedder, "__complexity__") else "O(L d)"
-        self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"
-        self.hybrid_complexity = hybrid_block.__complexity__ if hasattr(hybrid_block, "__complexity__") else "O(L d)"
-
-        self._init_weights()
-
-    def _init_weights(self):
-        """
-        Initialize weights following GPT-style conventions:
-        - Small std for embeddings
-        - Xavier/Kaiming for linear layers
-        - Scaled initialization for residual projections
-        """
-        std_embed = 0.02
-        try:
-            nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
-        except:
-            pass
-        try:
-            nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
-        except:
-            pass
-
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                std_init = 0.02
-                nn.init.normal_(module.weight, mean=0.0, std=std_init)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-
-        for block_idx, block in enumerate(self.blocks):
-            for name, module in block.named_modules():
-                if isinstance(module, nn.Linear):
-                    depth_scale = (2.0 * self.n_layers) ** -0.5
-                    if 'out' in name.lower() or 'proj' in name.lower() or '.l2' in name or '.g2' in name:
-                        with torch.no_grad():
-                            module.weight.data *= depth_scale
-
-    def forward(self, x: torch.LongTensor, unembed=True):
-        x = self.embedder(x) * math.sqrt(self.d_model)
-        x = self.pos_encoder(x)
-        for block in self.blocks:
-            x = block(x)
-        x = self.norm(x)
-        if unembed:
-            x = self.unembedder(x)
-        return x
-
-    @torch.no_grad()
-    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9,
-                 device='cpu'):
-        self.eval()
-        if prompt.dim() == 1:
-            prompt = prompt.unsqueeze(0)
-
-        generated = prompt.clone().to(device)
-
-        for _ in range(max_length):
-            logits_uncond = self.forward(generated)
-
-            logits = logits_uncond
-            next_token_logits = logits[:, -1, :] / temperature
-
-            sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-            sorted_indices_to_remove[:, 0] = 0
-            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-            next_token_logits[indices_to_remove] = float('-inf')
-
-            probs = F.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            generated = torch.cat([generated, next_token], dim=1)
-
-            if next_token.item() == 0:
-                break
-
-        return generated
-
-    def summary(self):
-        complexities = [self.channel_complexity, self.spatial_complextiy, self.embedder_complexity,
-                        self.unembedder_complexity]
-        print(f'{NUM}VATHOS{RES} Model Summary:')
-        print(f"{NUM}Symbolic1dSeq2SeqModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
-        print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)} - {NUM}{self.embedder_complexity}{RES}")
-        print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)} - {NUM}{self.unembedder_complexity}{RES}")
-        print(
-            f"\t - {NUM}Spatial Mixer{RES}: {getname(self.spatial_mixer)}({self.spatial_args}) - {NUM}{self.spatial_complextiy}{RES}")
-        print(
-            f"\t - {NUM}Channel Mixer{RES}: {getname(self.channel_mixer)}({self.channel_args}) - {NUM}{self.channel_complexity}{RES}")
-        print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
-        print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
-        print(f"Total Complexity: {NUM}{combine_big_o(complexities)}{RES}")
-
 
 #######################################################################################################################
 
