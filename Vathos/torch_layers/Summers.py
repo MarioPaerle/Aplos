@@ -91,6 +91,54 @@ class LinAtt2(nn.Module):
         return torch.einsum("bld, blde -> ble", Q, KV) + x
 
 
+class HolographicAttentionMixer(nn.Module):
+    __name__ = "HolographicAttentionMixer"
+    __complexity__ = "O(L d log d)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False):
+        super().__init__()
+        self.causal = causal
+        self.d_model = d_model
+
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        self.norm = RMSNorm(self.head_dim)
+
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).contiguous()
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+        T_vectors = holographic_binding(k, v)
+        T_vectors = self.norm(T_vectors)
+
+        if self.causal:
+            S_vectors = torch.cumsum(T_vectors, dim=2)
+        else:
+            S_vectors = T_vectors.sum(dim=2, keepdim=True).repeat(1, 1, L, 1)
+
+        S_vectors = self.norm(S_vectors)
+
+        attn = holographic_binding(q, S_vectors)
+
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+
+        return self.out(attn)
+
+
 
 
 if __name__ == '__main__':

@@ -62,6 +62,25 @@ def batched_channelwise_conv1d(K, V):
     return output.view(B, L, d)
 
 
+def holographic_binding(K, V):
+    """
+    Computes Batched Circular Convolution (Binding) using FFT.
+    This is O(d log d) and numerically stable.
+
+    K: [..., d] kernel
+    V: [..., d] signal
+    Output: [..., d]
+    """
+    V_f = torch.fft.rfft(V, dim=-1)
+    K_f = torch.fft.rfft(K, dim=-1)
+
+    output_f = V_f * K_f
+    output = torch.fft.irfft(output_f, n=V.shape[-1], dim=-1)
+
+    return output
+
+
+
 def power_weigthed_cumsum(x, a=0.999, rescale=True):
     """
     a torch implementation of a power weighted cumsum,

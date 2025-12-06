@@ -58,7 +58,6 @@ class Renamer:
         return self.constructor(*args, renamed_kwargs)
 
 
-
 class BlockStack(Layer):
     def __init__(self, blocks: Tuple[Block1d | Layer]):
         super().__init__()
