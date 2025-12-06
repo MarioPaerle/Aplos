@@ -108,14 +108,16 @@ class Layer(nn.Module):
     def profile(self, maxlevel=100, avg=False, plot=False, plot_level=1):
         """a Basic Layer level profiler operation"""
         import re
-        from collections import defaultdict
+        from collections import defaultdict, OrderedDict
 
         batched = not self._timer_unbatched
         print(
             f"Layer {NUM}{type(self).__name__}{RES} Times Profile (batched: {GOOD if batched else BAD}{batched}{RES}) (averaged: {GOOD if avg else BAD}{avg}{RES}):")
 
-        # Group layers for averaging
-        grouped_layers = defaultdict(list)
+        grouped_layers = OrderedDict()
+
+        order_map = {}
+        order_counter = 0
 
         for sublayer_name, sublayer_info in self._sublayers.items():
             layer = sublayer_info['layer']
@@ -127,10 +129,18 @@ class Layer(nn.Module):
             match = re.match(r'^(.+?)_(\d+)$', sublayer_name)
             if match:
                 base_name = match.group(1)
-                grouped_layers[(base_name, level)].append((sublayer_name, layer))
             else:
-                # No suffix, treat as standalone
-                grouped_layers[(sublayer_name, level)].append((sublayer_name, layer))
+                base_name = sublayer_name
+
+            key = (base_name, level)
+
+            # Track order of first appearance
+            if key not in order_map:
+                order_map[key] = order_counter
+                order_counter += 1
+                grouped_layers[key] = []
+
+            grouped_layers[key].append((sublayer_name, layer))
 
         if not avg:
             for sublayer_name, sublayer_info in self._sublayers.items():
@@ -141,9 +151,8 @@ class Layer(nn.Module):
                 indent = "    " * level
                 print(f"{indent}- {NUM}{sublayer_name}{RES}: {layer.get_mean_execution_time() * 1000:.2f}ms")
         else:
-            # Print averaged groups
-            for (base_name, level), layers_list in sorted(grouped_layers.items(),
-                                                          key=lambda x: (x[0][1], x[0][0])):
+            # Print averaged groups in the order they were registered
+            for (base_name, level), layers_list in grouped_layers.items():
                 indent = "    " * level
 
                 if len(layers_list) > 1:
@@ -164,7 +173,6 @@ class Layer(nn.Module):
                     sublayer_name, layer = layers_list[0]
                     print(f"{indent}- {NUM}{sublayer_name}{RES}: {layer.get_mean_execution_time() * 1000:.2f}ms")
 
-        # Generate pie plot if requested
         if plot:
             try:
                 import matplotlib.pyplot as plt
@@ -173,7 +181,6 @@ class Layer(nn.Module):
                 # Also include layers at lower levels that have no children at the target level
                 level_layers = defaultdict(list)
 
-                # First, find which layers have children at the target level
                 layers_with_children = set()
                 for (base_name, level), layers_list in grouped_layers.items():
                     if level == plot_level:
@@ -189,7 +196,6 @@ class Layer(nn.Module):
                                         if child is layer or (isinstance(child, nn.ModuleList) and layer in child):
                                             layers_with_children.add(parent_name)
 
-                # Collect layers at the target level
                 for (base_name, level), layers_list in grouped_layers.items():
                     if level == plot_level:
                         # Collect all instances at this level
@@ -219,11 +225,15 @@ class Layer(nn.Module):
                     fig, ax = plt.subplots(figsize=(12, 8))
                     colors = plt.cm.Set3(range(len(labels)))
 
+                    # Custom autopct function to hide percentages for small slices
+                    def autopct_format(pct):
+                        return f'{pct:.1f}%' if pct > 2 else ''
+
                     # Use pctdistance to move percentages and remove labels from pie
                     wedges, texts, autotexts = ax.pie(
                         times,
                         labels=None,  # Don't show labels on pie
-                        autopct='%1.1f%%',
+                        autopct=autopct_format,
                         startangle=90,
                         colors=colors,
                         pctdistance=0.85
@@ -231,7 +241,7 @@ class Layer(nn.Module):
 
                     # Enhance percentage text readability
                     for autotext in autotexts:
-                        autotext.set_color('white')
+                        autotext.set_color('black')
                         autotext.set_fontweight('bold')
                         autotext.set_fontsize(9)
 
@@ -398,7 +408,7 @@ class SwiGLU(Layer):
 
 class MLP(Layer):
     __name__ = "MLP"
-    __complexity__ = "O(depth L d)"
+    __complexity__ = "O(depth L d^2)"
 
     def __init__(self, d_model: int, depth: int, expand: int, activation: Callable, dropout=0.1):
         super().__init__()

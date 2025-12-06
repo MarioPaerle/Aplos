@@ -2,12 +2,14 @@
 All the layers included here aim to be already optimized by torch itself, without requiring triton/cuda kernels (explicitly),
 in fact they try to only use matmul and Linear operations which are arguably already optimized implicitly in torch.
 """
+import time
+
 import torch
 
 from Vathos._basics import *
 from typing import Tuple, Optional, Union, List
 import re
-from Vathos.complexity import combine_big_o
+from Vathos.complexity import combine_big_o_product, combine_big_o_sum
 import math
 import torch.nn.functional as F
 
@@ -503,6 +505,7 @@ class EasyEmbedder(Layer):
         self.embedding = nn.Embedding(vocab_size, d_model)
 
     def forward(self, x):
+        time.sleep(0.1)
         return self.embedding(x)
 
 
@@ -968,7 +971,7 @@ class SequenceModel(VathosModel):
             f"\t - {NUM}Channel Mixer{RES}: {getname(self.channel_mixer)}({self.channel_args}) - {NUM}{self.channel_complexity}{RES}")
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
-        print(f"Total Complexity: {NUM}{combine_big_o(complexities)}{RES}")
+        print(f"Total Complexity: {NUM}{combine_big_o_sum(complexities)}{RES}")
 
 
 #######################################################################################################################
@@ -1133,20 +1136,29 @@ if __name__ == "__main__":
         'sec_params': sec_params,
         'attn_params': attn_params
     }
-    model = SequenceModel(10, 12, 3, 64, pos_encoder=True,
-                          embedder=Embedder, unembedder=UnbiasedLinear, rope=False,
-                          spatial_mixer=LinearMixer,
-                          spatial_args={'max_len': 100})
+    model = SequenceModel(
+        vocab_size=100,
+        d_model=128,
+        n_layers=6,
+        max_len=2116,
+        pos_encoder=True,
+        embedder=EasyEmbedder,
+        unembedder=UnbiasedLinear,
+        channel_mixer=MLP,
+        channel_args={'expand': 2, 'activation': SwiGLU, 'depth':2},
+        rope=False,
+        spatial_mixer=MultiheadAttentionMixer,
+        spatial_args={'n_heads': 8, 'causal': True}
+    )
     out = model(x).detach()
-    plt.imshow(out[0])
-    plt.show()
+    out = model(x).detach()
+    out = model(x).detach()
+    out = model(x).detach()
+    out = model(x).detach()
+
     model.summary()
     model.profile()
-    model.profile(avg=True)
+    model.profile(avg=True, plot=True)
     model.autosave = False
-    for epoch in range(50):
-        for fake in range(150):
-            model.register_loss(1 / (epoch + 1) * 1 / (fake + 1))
-        model.register_epoch()
 
     model.plot_losses()

@@ -64,7 +64,7 @@ def compare_complexities(c1: Tuple[Dict[str, int], List[str]],
     return 0
 
 
-def combine_big_o(complexities: List[str]) -> str:
+def combine_big_o_product(complexities: List[str]) -> str:
     """
     Combines multiple Big O complexity strings by taking the dominant complexity.
 
@@ -142,29 +142,97 @@ def combine_big_o(complexities: List[str]) -> str:
     return f"O({' '.join(terms)})"
 
 
-# Example usage
-if __name__ == "__main__":
-    # Test cases
-    test1 = ["O(L^2 d^2)", "O(L d^2 k)", "O(L^2 d^2)"]
-    print(f"Input: {test1}")
-    print(f"Output: {combine_big_o(test1)}")
-    print()
+from typing import List
+from collections import defaultdict
+import re
 
-    test2 = ["O(n^2)", "O(n log n)", "O(n^3)"]
-    print(f"Input: {test2}")
-    print(f"Output: {combine_big_o(test2)}")
-    print()
 
-    test3 = ["O(n)", "O(n log n)"]
-    print(f"Input: {test3}")
-    print(f"Output: {combine_big_o(test3)}")
-    print()
+def combine_big_o_sum(complexities: List[str]) -> str:
+    """
+    Combines multiple Big O complexity strings by summing them and simplifying
+    like terms to return a human-readable dominant complexity.
 
-    test4 = ["O(n)", "O(m)", "O(k^2)"]
-    print(f"Input: {test4}")
-    print(f"Output: {combine_big_o(test4)}")
-    print()
+    Args:
+        complexities: List of Big O notation strings
 
-    test5 = ["O(L^1)", "O(L log L)"]
-    print(f"Input: {test5}")
-    print(f"Output: {combine_big_o(test5)}")
+    Returns:
+        Combined Big O notation representing the simplified sum
+
+    Examples:
+        >>> combine_big_o_sum(["O(n^2)", "O(n)", "O(1)"])
+        'O(n^2)'
+        >>> combine_big_o_sum(["O(L d^2)", "O(L d^2)", "O(L^2 d)"])
+        'O(L d^2 + L^2 d)'
+        >>> combine_big_o_sum(["O(depth L d^2)", "O(L^2 d)", "O(L d^2)", "O(L d^2)", "O(L d)"])
+        'O(L d^2 + L^2 d)'
+    """
+    if not complexities:
+        return "O(1)"
+
+    all_terms = []
+    for c in complexities:
+        term = c.strip()
+        if term.startswith("O(") and term.endswith(")"):
+            term = term[2:-1].strip()
+        if term and term != "1":
+            # Split by + to handle multiple terms in one complexity
+            all_terms.extend([t.strip() for t in term.split('+')])
+
+    if not all_terms:
+        return "O(1)"
+
+    term_groups = defaultdict(list)
+
+    for term in all_terms:
+        var_signature = []
+        parts = term.split()
+
+        for part in parts:
+            if part.replace('.', '').isdigit() or part in ['depth', 'batch', 'const']:
+                continue
+
+            # Parse variable with optional exponent
+            if '^' in part:
+                var, exp = part.split('^')
+                var_signature.append((var, int(exp)))
+            else:
+                var_signature.append((part, 1))
+
+        # Sort to create canonical signature
+        var_signature = tuple(sorted(var_signature))
+        term_groups[var_signature].append(term)
+
+    unique_terms = []
+    for sig, terms in term_groups.items():
+        representative = min(terms, key=lambda t: (len(t), t))
+        unique_terms.append((sig, representative))
+
+    if not unique_terms:
+        return "O(1)"
+
+    def complexity_score(sig_term):
+        sig, term = sig_term
+        if not sig:
+            return (0, 0, term)
+        # Total degree and max degree
+        total_degree = sum(exp for var, exp in sig)
+        max_degree = max(exp for var, exp in sig)
+        return (max_degree, total_degree, term)
+
+    unique_terms.sort(key=complexity_score, reverse=True)
+
+    # If clearly dominated, return just the dominant term(s)
+    if len(unique_terms) > 1:
+        top_score = complexity_score(unique_terms[0])
+        # Keep all terms with the same max complexity
+        result_terms = [term for sig_term in unique_terms
+                        if complexity_score(sig_term)[0] == top_score[0]]
+    else:
+        result_terms = [unique_terms[0][1]]
+
+    # Build result
+    if len(result_terms) == 1:
+        return f"O({result_terms[0]})"
+    else:
+        return f"O({' + '.join(result_terms)})"
+

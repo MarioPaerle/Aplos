@@ -57,7 +57,18 @@ More details are in the DOCU.md file
 ### Vathos Model class uses
 Vathos Model class can be used also to track losses, metrics[WIP] and has a built-in profiling system.
 Each Vathos Layer automatically keeps track of its timing internally, and can access to sublayers timers.
+An example of Sequence Models summary obtained by 
+```python
+model.summary()
+```
+![summary_example.png](imgs%2Fsummary_example.png)
 
+An example of Models Profiling Print and Plot obtained by 
+```python
+model.profile(avg=True, plot=True)
+```
+![profiling_example.png](imgs%2Fprofiling_example.png)
+![profiler_plot.png](imgs%2Fprofiler_plot.png)
 
 ---
 ### FLA Integration Example
