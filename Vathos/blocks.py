@@ -13,6 +13,8 @@ from Vathos.complexity import combine_big_o_product, combine_big_o_sum
 import math
 import torch.nn.functional as F
 
+from tqdm import tqdm
+
 
 class Block1d(Layer):
     def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer):
@@ -25,6 +27,20 @@ class Block1d(Layer):
     def forward(self, x: torch.Tensor):
         x = x + self.spatial_mixer(self.norm1(x))
         x = x + self.channel_mixer(self.norm2(x))
+        return x
+
+    def generate(self, x: torch.Tensor):
+        # Use generate if available, otherwise forward
+        if self.spatial_mixer.has_custom_generate():
+            x = x + self.spatial_mixer.generate(self.norm1(x))
+        else:
+            x = x + self.spatial_mixer(self.norm1(x))
+
+        if self.channel_mixer.has_custom_generate():
+            x = x + self.channel_mixer.generate(self.norm2(x))
+        else:
+            x = x + self.channel_mixer(self.norm2(x))
+
         return x
 
 
@@ -169,7 +185,7 @@ class LinearMixer(Layer):
         if self.causal:
             return torch.tril(self.W[:x.shape[1], :x.shape[1]]) @ x
         else:
-            self.W[:x.shape[1], :x.shape[1]] @ x
+            return self.W[:x.shape[1], :x.shape[1]] @ x
 
 
 class MLPMixer(Layer):
@@ -312,6 +328,9 @@ class MultiheadAttentionMixer(Layer):
 
         self.dropout = nn.Dropout(dropout)
 
+        # KV cache storage
+        self.kv_cache = None
+
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
 
@@ -321,14 +340,42 @@ class MultiheadAttentionMixer(Layer):
         if self.rope is not None:
             q, k = self.rope(q, k)
 
-        attn_mask = None
-        """if self.causal:
-            attn_mask = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), diagonal=1)"""
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def generate(self, x: torch.Tensor):
+        """Generate mode with KV caching"""
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (B, n_heads, L, head_dim)
+
+        # Handle KV cache
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            if self.rope is not None:
+                # Apply RoPE with position offset
+                pos_offset = k_cache.shape[2]
+                q, k = self.rope(q, k)  # Note: RoPE needs updating to support offset
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+        else:
+            if self.rope is not None:
+                q, k = self.rope(q, k)
+
+        # Update cache
+        self.kv_cache = (k, v)
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
         attn = self.dropout(attn)
         return self.out(attn)
+
+    def clear_cache(self):
+        """Clear KV cache"""
+        self.kv_cache = None
 
 
 class MultiheadLatentAttentionMixer(Layer):
@@ -808,7 +855,8 @@ class SequenceModel(VathosModel):
                  name='',
                  pad='none',
                  baseblock=Block1d,
-                 baseblock_args=None
+                 baseblock_args=None,
+                 dropout=0.1
                  ):
         super().__init__()
         self.pad = pad
@@ -849,8 +897,8 @@ class SequenceModel(VathosModel):
         self.blocks = nn.ModuleList([
             self.baseblock(
                 d_model=d_model,
-                channel_mixer=channel_mixer(d_model=d_model, **channel_args),
-                spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args),
+                channel_mixer=channel_mixer(d_model=d_model, dropout=dropout, **channel_args),
+                spatial_mixer=spatial_mixer(d_model=d_model, dropout=dropout, **spatial_args),
                 **baseblock_args
             )
             for _ in range(n_layers)
@@ -930,20 +978,85 @@ class SequenceModel(VathosModel):
         self.blocks.append(module)
 
     @torch.no_grad()
-    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9,
-                 device='cpu'):
+    def _clear_all_caches(self):
+        """Clear KV caches in all attention layers"""
+        for block in self.blocks:
+            for module in block.modules():
+                if hasattr(module, 'clear_cache'):
+                    module.clear_cache()
+
+    def forward(self, x: torch.LongTensor, unembed=True):
+        B, L = x.size(0), x.size(1)
+        x = self.embedder(x) * self.embed_scale
+        x = self.pos_encoder(x)
+
+        if self.pad == 'sqrt':
+            n = int((x.shape[1] ** 0.5) + 0.999999)
+            x = F.pad(x, (0, 0, 0, n ** 2 - L), mode="constant", value=0)
+
+        for block in self.blocks:
+            x = block(x)
+
+        if unembed:
+            x = self.unembedder(x)
+
+        return x[:, :L, :]
+
+    @torch.no_grad()
+    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9):
+        """Generate text autoregressively using KV caching when available"""
         self.eval()
         if prompt.dim() == 1:
             prompt = prompt.unsqueeze(0)
 
-        generated = prompt.clone().to(device)
+        generated = prompt.clone()
 
-        for _ in range(max_length):
-            logits_uncond = self.forward(generated)
+        # Clear any existing caches
+        self._clear_all_caches()
 
-            logits = logits_uncond
+        # First pass: process entire prompt
+        B, L = generated.shape
+        x = self.embedder(generated) * self.embed_scale
+        x = self.pos_encoder(x)
+
+        for block in self.blocks:
+            if block.has_custom_generate():
+                x = block.generate(x)
+            else:
+                x = block(x)
+
+        logits = self.unembedder(x)
+        next_token_logits = logits[:, -1, :] / temperature
+
+        # Apply top-p sampling
+        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+        sorted_indices_to_remove[:, 0] = 0
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        next_token_logits[indices_to_remove] = float('-inf')
+
+        probs = F.softmax(next_token_logits, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        generated = torch.cat([generated, next_token], dim=1)
+
+        # Subsequent passes: process one token at a time with caching
+        for _ in tqdm(range(max_length - 1)):
+            # Only embed the new token
+            x = self.embedder(next_token) * self.embed_scale
+            x = self.pos_encoder(x)  # Note: pos_encoder might need adjustment for single tokens
+
+            for block in self.blocks:
+                if block.has_custom_generate():
+                    x = block.generate(x)
+                else:
+                    x = block(x)
+
+            logits = self.unembedder(x)
             next_token_logits = logits[:, -1, :] / temperature
 
+            # Apply top-p sampling
             sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
             cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
             sorted_indices_to_remove = cumulative_probs > top_p
@@ -956,8 +1069,10 @@ class SequenceModel(VathosModel):
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 
-            if next_token.item() == 0:
+            if next_token.item() == 355:  # EOS token
                 break
+
+        self._clear_all_caches()
 
         return generated
 
@@ -1154,14 +1269,12 @@ if __name__ == "__main__":
         spatial_args={'n_heads': 8, 'causal': True}
     )
     out = model(x).detach()
-    out = model(x).detach()
-    out = model(x).detach()
-    out = model(x).detach()
-    out = model(x).detach()
+
 
     model.summary()
     model.profile()
     model.profile(avg=True, plot=True)
     model.autosave = False
+    model.generate(torch.tensor([0]), 1000, temperature=1)
 
     model.plot_losses()

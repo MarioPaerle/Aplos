@@ -270,6 +270,13 @@ class Layer(nn.Module):
         elapsed = timer() - start_time
         return elapsed, rets
 
+    def generate(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+    def has_custom_generate(self):
+        """Check if this layer has overridden the generate method"""
+        return type(self).generate is not Layer.generate
+
 
 class Builder:
     def __init__(self, layer, **params):
