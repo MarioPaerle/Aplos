@@ -48,8 +48,8 @@ model = SequenceModel(vocab_size=VOCAB_SIZE,
 This will give you a Vathos Layer object, which is actually a nn.Module object, which will easily adapt to your existing code, since it 
 behave exaclty as a torch object.
 Note that in this example a specific channel mixer is provided 'MLP' and its params are passed via a dict.
-Same thing could0ve been done for the spatial mixer, which by default is a MultiHeadAttention.
-More details are in the DOCU.md file
+Same thing could've been done for the spatial mixer, which by default is a MultiHeadAttention.
+More Details in the github wiki.
 > [!IMPORTANT] 
 > Please Note that for now Vathos _SequenceModel_ is not ready for efficient inference algorithm, as its native 
 > _generate()_ function is simply calling the forward. 
