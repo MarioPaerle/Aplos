@@ -1003,7 +1003,7 @@ class SequenceModel(VathosModel):
         return x[:, :L, :]
 
     @torch.no_grad()
-    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9):
+    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9, token_end=0, custom_generate=True):
         """Generate text autoregressively using KV caching when available"""
         self.eval()
         if prompt.dim() == 1:
@@ -1020,7 +1020,7 @@ class SequenceModel(VathosModel):
         x = self.pos_encoder(x)
 
         for block in self.blocks:
-            if block.has_custom_generate():
+            if custom_generate and block.has_custom_generate():
                 x = block.generate(x)
             else:
                 x = block(x)
@@ -1069,7 +1069,7 @@ class SequenceModel(VathosModel):
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 
-            if next_token.item() == 355:  # EOS token
+            if next_token.item() == token_end:  # EOS token
                 break
 
         self._clear_all_caches()
