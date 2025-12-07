@@ -138,10 +138,10 @@ class KroneckerMixer1(Layer):
         nmax = int((max_len ** 0.5) + 1)
         self.nmax = nmax
 
-        self.As = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
-        self.Bs = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
-        self.Aps = nn.Parameter(torch.randn(nmax) * 0.02)
-        self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.As = nn.Parameter(torch.randn(nmax, nmax) *  0.1)
+        self.Bs = nn.Parameter(torch.randn(nmax, nmax) *  0.1)
+        self.Aps = nn.Parameter(torch.randn(nmax) *       0.1)
+        self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.1)
 
     def _mask_params(self, A, Bp):
         A = torch.tril(A, diagonal=-1)

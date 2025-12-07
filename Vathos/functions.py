@@ -71,11 +71,11 @@ def holographic_binding(K, V):
     V: [..., d] signal
     Output: [..., d]
     """
-    V_f = torch.fft.rfft(V, dim=-1)
-    K_f = torch.fft.rfft(K, dim=-1)
+    V_f = torch.fft.rfft(V, dim=-1, norm='ortho')
+    K_f = torch.fft.rfft(K, dim=-1, norm='ortho')
 
     output_f = V_f * K_f
-    output = torch.fft.irfft(output_f, n=V.shape[-1], dim=-1)
+    output = torch.fft.irfft(output_f, n=V.shape[-1], dim=-1, norm='ortho')
 
     return output
 
@@ -97,6 +97,35 @@ def power_weigthed_cumsum(x, a=0.999, rescale=True):
 
     return torch.cumsum(x / alpha_pow, dim=1) * alpha_pow * (alpha_pow[:, 0, ...] if rescale else 1)
 
+
+def stable_power_weighted_cumsum(x: torch.Tensor, a: float = 0.999, rescale: bool = True) -> torch.Tensor:
+    B, L = x.shape[:2]
+
+    dtype = x.dtype
+    if L > 1024 and x.dtype == torch.float32:
+        x = x.to(torch.float64)
+        a_tensor = torch.tensor(a, dtype=torch.float64, device=x.device)
+    else:
+        a_tensor = torch.tensor(a, dtype=x.dtype, device=x.device)
+
+    t = torch.arange(1, L + 1, dtype=a_tensor.dtype, device=x.device)
+
+    alpha_pow = torch.pow(a_tensor, t)
+
+
+    reshape_dims = [1, L] + [1] * (len(x.shape) - 2)
+    alpha_pow = alpha_pow.view(*reshape_dims)
+
+    scaled_input = x / alpha_pow
+
+    s_cumulative = torch.cumsum(scaled_input, dim=1)
+
+    s = s_cumulative * alpha_pow
+
+    if rescale:
+        s = s * (1.0 - a_tensor)
+
+    return s.to(dtype)
 
 def precompute_power_weigthed_cumsum(x, alpha_pow):
     return torch.cumsum(x / alpha_pow, dim=1) * alpha_pow

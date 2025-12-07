@@ -897,8 +897,8 @@ class SequenceModel(VathosModel):
         self.blocks = nn.ModuleList([
             self.baseblock(
                 d_model=d_model,
-                channel_mixer=channel_mixer(d_model=d_model, dropout=dropout, **channel_args),
-                spatial_mixer=spatial_mixer(d_model=d_model, dropout=dropout, **spatial_args),
+                channel_mixer=channel_mixer(d_model=d_model, **channel_args),
+                spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args),
                 **baseblock_args
             )
             for _ in range(n_layers)
