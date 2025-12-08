@@ -2,7 +2,7 @@ from tqdm.notebook import tqdm
 from Vathos.blocks import *
 
 
-def symbolic_1d_ar_pretokenized_train(model, train_loader, val_loader, optimizer, scheduler, criterion,
+def symbolic_1d_ar_target_train(model, train_loader, val_loader, optimizer, scheduler, criterion,
           device, NUM_EPOCHS=100, use_amp=False, CLIP_NORM=1.0, div=1):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
@@ -65,7 +65,7 @@ def symbolic_1d_ar_pretokenized_train(model, train_loader, val_loader, optimizer
 
 
 def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, scheduler, criterion,
-          device, NUM_EPOCHS=100, use_amp=False, CLIP_NORM=1.0, spe=1000):
+                                      device, NUM_EPOCHS=100, use_amp=False, CLIP_NORM=1.0, spe=1000):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     steps_per_epoch = spe
@@ -94,8 +94,8 @@ def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, s
             torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
             scaler.step(optimizer)
             scaler.update()
-
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
 
             running_loss += loss.item()
             lr_now = optimizer.param_groups[0]['lr']
@@ -117,12 +117,14 @@ def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, s
                     batch_x[:, 1:].reshape(-1)
                 )
                 val_loss += loss.item()
-                if isinstance(model, VathosModel):
-                    model.module.register_loss(loss.item())
+                model.module.register_loss(loss.item())
 
         val_avg = val_loss / len(val_loader)
-        if isinstance(model, VathosModel):
-            model.module.register_epoch()
+        model.module.register_epoch()
         print(f"Epoch {epoch + 1} val avg loss: {val_avg:.4f}")
+
+
+symbolic_1d_ar_pretokenized_train(model, train_loader, val_loader, optimizer, scheduler=scheduler, criterion=criterion,
+                                  device=device, NUM_EPOCHS=100, use_amp=use_amp)
 
 
