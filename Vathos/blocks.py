@@ -17,12 +17,12 @@ from tqdm import tqdm
 
 
 class Block1d(Layer):
-    def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer):
+    def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, norm=nn.LayerNorm):
         super().__init__()
         self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
-        self.norm1 = nn.LayerNorm(spatial_mixer.d_model)
-        self.norm2 = nn.LayerNorm(spatial_mixer.d_model)
+        self.norm1 = norm(spatial_mixer.d_model)
+        self.norm2 = norm(spatial_mixer.d_model)
 
     def forward(self, x: torch.Tensor):
         x = x + self.spatial_mixer(self.norm1(x))
@@ -856,7 +856,8 @@ class SequenceModel(VathosModel):
                  pad='none',
                  baseblock=Block1d,
                  baseblock_args=None,
-                 dropout=0.1
+                 dropout=0.1,
+                 weight_tying=False
                  ):
         super().__init__()
         self.pad = pad
@@ -874,6 +875,7 @@ class SequenceModel(VathosModel):
             embedder_args = {}
         if baseblock_args is None:
             baseblock_args = {}
+
 
         self.pipe = {}
         self.name = name
@@ -907,6 +909,13 @@ class SequenceModel(VathosModel):
 
         self.norm = nn.LayerNorm(d_model)
         self.unembedder = unembedder(d_model, vocab_size)
+        if weight_tying and isinstance(self.embedder, EasyEmbedder) and isinstance(self.unembedder, UnbiasedLinear):
+            self.unembedder.linear.weight = self.embedder.embeddings.weight
+        else:
+            raise TypeError("Automatic weight tying is only possible if the embedder is an EasyEmbedder and Unembedder is an UnbiasedLinear."
+                            " You shoul manually do weight tying if you aim to use specific layer:"
+                            "\n e.g. model.unembedder.linear.weight = model.embedder.embeddings.weight is the auto weight tying.")
+
 
         self.embedder_complexity = embedder.__complexity__ if hasattr(embedder, "__complexity__") else "O(L d)"
         self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"

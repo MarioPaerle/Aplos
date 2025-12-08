@@ -536,8 +536,6 @@ class ConvResBlock(Layer):
 
 
 class RMSNorm(Layer):
-    """Root Mean Square Normalization for stabilizing HRR vectors."""
-
     def __init__(self, d_model: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
