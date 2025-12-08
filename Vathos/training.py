@@ -124,7 +124,4 @@ def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, s
         print(f"Epoch {epoch + 1} val avg loss: {val_avg:.4f}")
 
 
-symbolic_1d_ar_pretokenized_train(model, train_loader, val_loader, optimizer, scheduler=scheduler, criterion=criterion,
-                                  device=device, NUM_EPOCHS=100, use_amp=use_amp)
-
 

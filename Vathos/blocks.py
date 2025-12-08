@@ -909,9 +909,10 @@ class SequenceModel(VathosModel):
 
         self.norm = nn.LayerNorm(d_model)
         self.unembedder = unembedder(d_model, vocab_size)
+
         if weight_tying and isinstance(self.embedder, EasyEmbedder) and isinstance(self.unembedder, UnbiasedLinear):
             self.unembedder.linear.weight = self.embedder.embeddings.weight
-        else:
+        elif weight_tying:
             raise TypeError("Automatic weight tying is only possible if the embedder is an EasyEmbedder and Unembedder is an UnbiasedLinear."
                             " You shoul manually do weight tying if you aim to use specific layer:"
                             "\n e.g. model.unembedder.linear.weight = model.embedder.embeddings.weight is the auto weight tying.")
