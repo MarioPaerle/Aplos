@@ -184,6 +184,7 @@ class KroneckerMixer2(Layer):
         self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
         self.conv = CausalConv1d(k=k, d_model=self.d_model)
         self.gate = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(0.1)
 
     def _mask_params(self, A, Bp):
         A = torch.tril(A, diagonal=-1)
