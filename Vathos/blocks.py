@@ -378,6 +378,81 @@ class MultiheadAttentionMixer(Layer):
         self.kv_cache = None
 
 
+class MultiheadLocalAttentionMixer(Layer):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d +  L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.1, LMAX=128):
+        super().__init__()
+        self.LMAX = LMAX
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+        self.dropout = nn.Dropout(dropout)
+
+        # KV cache storage
+        self.kv_cache = None
+
+    def forward(self, x: torch.Tensor):
+        res = x
+        x = x[:, -self.LMAX:, :]
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        out = self.out(attn)
+        res[:, -self.LMAX:, :] = out
+        return res
+
+    def generate(self, x: torch.Tensor):
+        """Generate mode with KV caching"""
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (B, n_heads, L, head_dim)
+
+        # Handle KV cache
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            if self.rope is not None:
+                # Apply RoPE with position offset
+                pos_offset = k_cache.shape[2]
+                q, k = self.rope(q, k)  # Note: RoPE needs updating to support offset
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+        else:
+            if self.rope is not None:
+                q, k = self.rope(q, k)
+
+        # Update cache
+        self.kv_cache = (k, v)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def clear_cache(self):
+        """Clear KV cache"""
+        self.kv_cache = None
+
+
 class MultiheadLatentAttentionMixer(Layer):
     __name__ = "MultiheadLatentAttentionMixer"
     __complexity__ = "O(L^2 d + L d * d_kv_lora)"
@@ -876,7 +951,6 @@ class SequenceModel(VathosModel):
         if baseblock_args is None:
             baseblock_args = {}
 
-
         self.pipe = {}
         self.name = name
         self.baseblock = baseblock
@@ -914,10 +988,10 @@ class SequenceModel(VathosModel):
             self.unembedder.linear.weight = self.embedder.embedding.weight
 
         elif weight_tying:
-            raise TypeError("Automatic weight tying is only possible if the embedder is an EasyEmbedder and Unembedder is an UnbiasedLinear."
-                            " You shoul manually do weight tying if you aim to use specific layer:"
-                            "\n e.g. model.unembedder.linear.weight = model.embedder.embeddings.weight is the auto weight tying.")
-
+            raise TypeError(
+                "Automatic weight tying is only possible if the embedder is an EasyEmbedder and Unembedder is an UnbiasedLinear."
+                " You shoul manually do weight tying if you aim to use specific layer:"
+                "\n e.g. model.unembedder.linear.weight = model.embedder.embeddings.weight is the auto weight tying.")
 
         self.embedder_complexity = embedder.__complexity__ if hasattr(embedder, "__complexity__") else "O(L d)"
         self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"
@@ -1274,13 +1348,12 @@ if __name__ == "__main__":
         embedder=EasyEmbedder,
         unembedder=UnbiasedLinear,
         channel_mixer=MLP,
-        channel_args={'expand': 2, 'activation': SwiGLU, 'depth':2},
+        channel_args={'expand': 2, 'activation': SwiGLU, 'depth': 2},
         rope=False,
         spatial_mixer=MultiheadAttentionMixer,
         spatial_args={'n_heads': 8, 'causal': True}
     )
     out = model(x).detach()
-
 
     model.summary()
     model.profile()
