@@ -378,7 +378,7 @@ class MultiheadAttentionMixer(Layer):
         self.kv_cache = None
 
 
-class MultiheadLocalAttentionMixer(Layer):
+class MultiheadFinalAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d +  L d^2)"
 
@@ -940,7 +940,7 @@ class SequenceModel(VathosModel):
             flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
-        if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
+        if spatial_args is None and spatial_mixer is MultiheadAttentionMixer or spatial_mixer is MultiheadFinalAttentionMixer:
             spatial_args = {"causal": True, "n_heads": 8, "rope": rope}
         if spatial_args is None:
             spatial_args = {}
@@ -1350,8 +1350,8 @@ if __name__ == "__main__":
         channel_mixer=MLP,
         channel_args={'expand': 2, 'activation': SwiGLU, 'depth': 2},
         rope=False,
-        spatial_mixer=MultiheadAttentionMixer,
-        spatial_args={'n_heads': 8, 'causal': True}
+        spatial_mixer=MultiheadFinalAttentionMixer,
+        spatial_args={'n_heads': 8, 'causal': True, 'LMAX': 128}
     )
     out = model(x).detach()
 
