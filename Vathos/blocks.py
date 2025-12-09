@@ -1283,11 +1283,11 @@ if __name__ == "__main__":
         pos_encoder=True,
         embedder=EasyEmbedder,
         unembedder=UnbiasedLinear,
-        channel_mixer=MLP,
-        channel_args={'expand': 2, 'activation': SwiGLU, 'depth': 2},
-        rope=False,
-        spatial_mixer=MultiheadFinalAttentionMixer,
-        spatial_args={'n_heads': 8, 'causal': True, 'LMAX': 128}
+        channel_mixer=DLPSwiGLU,
+        channel_args={'expand': 2},
+        rope=True,
+        spatial_mixer=MultiheadAttentionMixer,
+        spatial_args={'n_heads': 8, 'causal': True}
     )
     out = model(x).detach()
 
@@ -1295,6 +1295,6 @@ if __name__ == "__main__":
     model.profile()
     model.profile(avg=True, plot=True)
     model.autosave = False
-    model.generate(torch.tensor([0]), 1000, temperature=1)
+    model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=False)
 
     model.plot_losses()

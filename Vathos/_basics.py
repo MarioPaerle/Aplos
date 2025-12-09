@@ -464,7 +464,7 @@ class DLPGelu(Layer):
 class DLPSwiGLU(Layer):
     def __init__(self, d_model, expand, dropout=0.1):
         super().__init__()
-        self.expand = nn.Linear(d_model, d_model * expand, bias=True)
+        self.expand = nn.Linear(d_model, d_model * expand * 2, bias=True)
         self.contract = nn.Linear(d_model * expand, d_model, bias=True)
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
