@@ -169,7 +169,7 @@ class KroneckerMixer1(Layer):
 
 class KroneckerMixer2(Layer):
     __name__ = "KroneckerMixer2"
-    __complexity__ = 'O(sqrt(L) L)'
+    __complexity__ = 'O(sqrt(L) L d)'
 
     def __init__(self, d_model, max_len, k=3):
         super().__init__()
@@ -200,8 +200,10 @@ class KroneckerMixer2(Layer):
         B = self.Bs[:n, :n]
         Ap = self.Aps[:n]
         A, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
+        X = F.gelu(self.conv(X))
         g = torch.sigmoid(self.gate(X))
-        X = self.single_level(self.conv(X), A, B, Ap, Bp) * g + (1 - g) * X
+        X = self.single_level(X, A, B, Ap, Bp) * g + (1 - g) * X
+        X = self.dropout(X)
 
         return X  # [:, :L, :]
 
