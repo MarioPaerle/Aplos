@@ -233,7 +233,30 @@ class ShortConvGatedMixer(Layer):
 #   TRANSFORMERS
 ########################################################################################################################
 
-# TODO: Needs fixes!
+# TODO: Needs fixe
+
+class SinusoidalPositionalEncoding(Layer):
+    __name__ = "SinusoidalPositionalEncoding"
+    __complexity__ = "O(L^2 d^2)"
+
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        self.d_model = d_model
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+        return x + self.pe[:L]
+
+
 class RoPE(Layer):
     __name__ = "RoPE"
 
@@ -260,52 +283,41 @@ class RoPE(Layer):
             self._cos_cached = emb.cos()
             self._sin_cached = emb.sin()
 
-    def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                          start_pos: int = 0) -> torch.Tensor:
+        """Apply rotary embeddings starting from start_pos"""
         seq_len = x.shape[-3] if x.ndim == 4 else x.shape[-2]
 
-        cos = cos[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)  # [1, L, 1, D] or [1, L, D]
-        sin = sin[:seq_len].unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
+        cos = cos[start_pos:start_pos + seq_len]
+        sin = sin[start_pos:start_pos + seq_len]
 
-        x1, x2 = x.chunk(2, dim=-1)  # each: [..., D//2]
+        cos = cos.unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
+        sin = sin.unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
 
+        x1, x2 = x.chunk(2, dim=-1)
         return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor = None):
+    def forward(self, q: torch.Tensor, k: torch.Tensor = None, start_pos: int = 0):
+        """
+        Args:
+            q: Query tensor
+            k: Key tensor (optional)
+            start_pos: Starting position for RoPE (used during generation)
+        """
         assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
         if k is not None:
             assert k.shape == q.shape, "k must have same shape as q"
 
-        self._update_cache(q.shape[-3] if q.ndim == 4 else q.shape[-2], q.dtype, q.device)
+        seq_len = q.shape[-3] if q.ndim == 4 else q.shape[-2]
+        self._update_cache(start_pos + seq_len, q.dtype, q.device)
 
         cos = self._cos_cached
         sin = self._sin_cached
 
-        q_rope = self._apply_rotary_emb(q, cos, sin)
-        k_rope = self._apply_rotary_emb(k, cos, sin) if k is not None else None
+        q_rope = self._apply_rotary_emb(q, cos, sin, start_pos)
+        k_rope = self._apply_rotary_emb(k, cos, sin, start_pos) if k is not None else None
 
         return (q_rope, k_rope) if k_rope is not None else q_rope
-
-
-class SinusoidalPositionalEncoding(Layer):
-    __name__ = "SinusoidalPositionalEncoding"
-    __complexity__ = "O(L^2 d^2)"
-
-    def __init__(self, d_model: int, max_len: int = 5000):
-        super().__init__()
-        self.d_model = d_model
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-        return x + self.pe[:L]
 
 
 class MultiheadAttentionMixer(Layer):
@@ -328,7 +340,6 @@ class MultiheadAttentionMixer(Layer):
 
         self.dropout = nn.Dropout(dropout)
 
-        # KV cache storage
         self.kv_cache = None
 
     def forward(self, x: torch.Tensor):
@@ -338,7 +349,7 @@ class MultiheadAttentionMixer(Layer):
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
         if self.rope is not None:
-            q, k = self.rope(q, k)
+            q, k = self.rope(q, k, start_pos=0)
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
@@ -346,101 +357,25 @@ class MultiheadAttentionMixer(Layer):
         return self.out(attn)
 
     def generate(self, x: torch.Tensor):
-        """Generate mode with KV caching"""
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (B, n_heads, L, head_dim)
-
-        # Handle KV cache
-        if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
-            if self.rope is not None:
-                # Apply RoPE with position offset
-                pos_offset = k_cache.shape[2]
-                q, k = self.rope(q, k)  # Note: RoPE needs updating to support offset
-            k = torch.cat([k_cache, k], dim=2)
-            v = torch.cat([v_cache, v], dim=2)
-        else:
-            if self.rope is not None:
-                q, k = self.rope(q, k)
-
-        # Update cache
-        self.kv_cache = (k, v)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def clear_cache(self):
-        """Clear KV cache"""
-        self.kv_cache = None
-
-
-class MultiheadFinalAttentionMixer(Layer):
-    __name__ = "MultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d +  L d^2)"
-
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.1, LMAX=128):
-        super().__init__()
-        self.LMAX = LMAX
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-        self.dropout = nn.Dropout(dropout)
-
-        # KV cache storage
-        self.kv_cache = None
-
-    def forward(self, x: torch.Tensor):
-        res = x
-        x = x[:, -self.LMAX:, :]
         B, L, D = x.shape
 
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
-        if self.rope is not None:
-            q, k = self.rope(q, k)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        out = self.out(attn)
-        res[:, -self.LMAX:, :] = out
-        return res
-
-    def generate(self, x: torch.Tensor):
-        """Generate mode with KV caching"""
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (B, n_heads, L, head_dim)
-
-        # Handle KV cache
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
-            if self.rope is not None:
-                # Apply RoPE with position offset
-                pos_offset = k_cache.shape[2]
-                q, k = self.rope(q, k)  # Note: RoPE needs updating to support offset
+            pos_offset = k_cache.shape[2]
+        else:
+            pos_offset = 0
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=pos_offset)
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
-        else:
-            if self.rope is not None:
-                q, k = self.rope(q, k)
 
-        # Update cache
         self.kv_cache = (k, v)
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
@@ -449,9 +384,9 @@ class MultiheadFinalAttentionMixer(Layer):
         return self.out(attn)
 
     def clear_cache(self):
-        """Clear KV cache"""
         self.kv_cache = None
 
+# TODO: Local Attention
 
 class MultiheadLatentAttentionMixer(Layer):
     __name__ = "MultiheadLatentAttentionMixer"
@@ -940,7 +875,7 @@ class SequenceModel(VathosModel):
             flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
-        if spatial_args is None and spatial_mixer is MultiheadAttentionMixer or spatial_mixer is MultiheadFinalAttentionMixer:
+        if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
             spatial_args = {"causal": True, "n_heads": 8, "rope": rope}
         if spatial_args is None:
             spatial_args = {}
@@ -1095,14 +1030,15 @@ class SequenceModel(VathosModel):
             prompt = prompt.unsqueeze(0)
 
         generated = prompt.clone()
-
-        # Clear any existing caches
         self._clear_all_caches()
 
-        # First pass: process entire prompt
-        B, L = generated.shape
         x = self.embedder(generated) * self.embed_scale
-        x = self.pos_encoder(x)
+
+        # For positional encoding during first pass
+        if isinstance(self.pos_encoder, SinusoidalPositionalEncoding):
+            x = self.pos_encoder(x)
+        else:
+            x = self.pos_encoder(x)
 
         for block in self.blocks:
             if custom_generate and block.has_custom_generate():
@@ -1113,7 +1049,6 @@ class SequenceModel(VathosModel):
         logits = self.unembedder(x)
         next_token_logits = logits[:, -1, :] / temperature
 
-        # Apply top-p sampling
         sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
         sorted_indices_to_remove = cumulative_probs > top_p
@@ -1126,14 +1061,17 @@ class SequenceModel(VathosModel):
         next_token = torch.multinomial(probs, num_samples=1)
         generated = torch.cat([generated, next_token], dim=1)
 
-        # Subsequent passes: process one token at a time with caching
-        for _ in tqdm(range(max_length - 1)):
-            # Only embed the new token
+        for step in tqdm(range(max_length - 1)):
             x = self.embedder(next_token) * self.embed_scale
-            x = self.pos_encoder(x)  # Note: pos_encoder might need adjustment for single tokens
+
+            if isinstance(self.pos_encoder, SinusoidalPositionalEncoding):
+                current_pos = generated.shape[1] - 1
+                x = x + self.pos_encoder.pe[current_pos:current_pos + 1].unsqueeze(0)
+            else:
+                x = self.pos_encoder(x)
 
             for block in self.blocks:
-                if block.has_custom_generate():
+                if custom_generate and block.has_custom_generate():
                     x = block.generate(x)
                 else:
                     x = block(x)
@@ -1141,7 +1079,6 @@ class SequenceModel(VathosModel):
             logits = self.unembedder(x)
             next_token_logits = logits[:, -1, :] / temperature
 
-            # Apply top-p sampling
             sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
             cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
             sorted_indices_to_remove = cumulative_probs > top_p
@@ -1154,11 +1091,10 @@ class SequenceModel(VathosModel):
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 
-            if next_token.item() == token_end:  # EOS token
+            if next_token.item() == token_end:
                 break
 
         self._clear_all_caches()
-
         return generated
 
     def summary(self):
