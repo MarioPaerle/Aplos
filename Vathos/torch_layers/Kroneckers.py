@@ -138,9 +138,9 @@ class KroneckerMixer1(Layer):
         nmax = int((max_len ** 0.5) + 1)
         self.nmax = nmax
 
-        self.As = nn.Parameter(torch.randn(nmax, nmax) *  0.1)
-        self.Bs = nn.Parameter(torch.randn(nmax, nmax) *  0.1)
-        self.Aps = nn.Parameter(torch.randn(nmax) *       0.1)
+        self.As = nn.Parameter(torch.randn(nmax, nmax) * 0.1)
+        self.Bs = nn.Parameter(torch.randn(nmax, nmax) * 0.1)
+        self.Aps = nn.Parameter(torch.randn(nmax) * 0.1)
         self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.1)
 
     def _mask_params(self, A, Bp):
@@ -209,6 +209,58 @@ class KroneckerMixer2(Layer):
         return X  # [:, :L, :]
 
 
+class KOBRA1(Layer):
+    __name__ = "KroneckerMixer2"
+    __complexity__ = 'O(sqrt(L) L d)'
+
+    def __init__(self, d_model, max_len, k=3):
+        super().__init__()
+        self.max_len = max_len
+        self.d_model = d_model
+        nmax = int((max_len ** 0.5) + 1)
+        self.nmax = nmax
+
+        self.As = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.Bs = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.Aps = nn.Parameter(torch.randn(nmax) * 0.02)
+        self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
+        self.conv = CausalConv1d(k=k, d_model=self.d_model)
+        self.gate = nn.Linear(d_model, d_model)
+        self.qk = nn.Linear(d_model, 2 * d_model)
+
+        self.dropout = nn.Dropout(0.1)
+
+    def _mask_params(self, A, Bp):
+        A = torch.tril(A, diagonal=-1)
+        Bp = torch.tril(Bp)
+        return A, Bp
+
+    def single_level(self, X, A, B, Ap, Bp):
+        Y = _kronecker_batch_matmul_einsum(A, B, X) + _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
+        return Y
+
+    def forward(self, X):
+        b, L, d = X.shape
+        q, k = self.qk(X).chunk(2, dim=-1)
+        n = int((L ** 0.5) + 0.999999)
+        B = self.Bs[:n, :n]
+        Ap = self.Aps[:n]
+        A, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
+        X = F.gelu(self.conv(X))
+        g = torch.sigmoid(self.gate(X))
+        X = self.single_level(X, A, B, Ap, Bp) * g + (1 - g) * X
+        X = self.dropout(X)
+
+        q = q.view(b * L, d).unsqueeze(1)
+        k = k.view(b * L, d).unsqueeze(-1)
+
+        qk = q @ k
+        qk = qk.squeeze(-1).view(b, L, 1)
+
+        X = X * qk
+
+        return X  # [:, :L, :]
+
 class QKVKroneckerMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L sqrt(L) d^2)"
@@ -228,8 +280,8 @@ class QKVKroneckerMixer(Layer):
         else:
             self.rope = None
 
-        self.As = nn.Parameter(torch. empty(nmax, nmax), requires_grad=False)
-        self.Bs = nn.Parameter(torch. randn(nmax, nmax) * 0.02)
+        self.As = nn.Parameter(torch.empty(nmax, nmax), requires_grad=False)
+        self.Bs = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
         self.Aps = nn.Parameter(torch.randn(nmax) * 0.02)
         self.Bps = nn.Parameter(torch.randn(nmax, nmax) * 0.02)
 
@@ -254,7 +306,7 @@ class QKVKroneckerMixer(Layer):
         B = self.Bs[:n, :n]
         Ap = self.Aps[:n]
         A, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
-        X = self.single_level((F.elu(k) + 1)*v, A, B, Ap, Bp)*(F.elu(q) + 1)
+        X = self.single_level((F.elu(k) + 1) * v, A, B, Ap, Bp) * (F.elu(q) + 1)
 
         return self.out(X)
 
@@ -276,8 +328,6 @@ if __name__ == '__main__':
         'n_sec': 3
 
     }
-
-
 
     model = SequenceModel(
         vocab_size=10,
