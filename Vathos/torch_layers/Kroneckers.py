@@ -242,6 +242,7 @@ class KOBRA1(Layer):
     def forward(self, X):
         b, L, d = X.shape
         q, k = self.qk(X).chunk(2, dim=-1)
+
         n = int((L ** 0.5) + 0.999999)
         B = self.Bs[:n, :n]
         Ap = self.Aps[:n]
@@ -253,12 +254,12 @@ class KOBRA1(Layer):
         X = self.dropout(X)
 
         q = q.view(b * L, d).unsqueeze(1)
-        k = k.view(b * L, d).unsqueeze(-1)
+        X = X.view(b * L, d).unsqueeze(-1)
 
-        qk = q @ k
-        qk = qk.squeeze(-1).view(b, L, 1)
+        qx = q @ X
+        qx = qx.squeeze(-1).view(b, L, 1)
 
-        X = X * qk
+        X = k * qx
 
         return X  # [:, :L, :]
 
