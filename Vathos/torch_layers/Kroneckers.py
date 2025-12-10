@@ -209,6 +209,90 @@ class KroneckerMixer2(Layer):
         return X  # [:, :L, :]
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# Assuming your helper functions are defined elsewhere:
+# _kronecker_batch_matmul_einsum, _kronecker_batch_matmul_diagonal_einsum
+
+class KroneckerMixer3(nn.Module):
+    __name__ = "KroneckerMixer3"
+    __complexity__ = 'O(sqrt(L) L d)'
+
+    def __init__(self, d_model, max_len, k=3):
+        super().__init__()
+        self.d_model = d_model
+
+        self.nmax = int((max_len ** 0.5) + 1)
+
+        self.As = nn.Parameter(torch.randn(self.nmax, self.nmax) * 0.02)
+        self.Bs = nn.Parameter(torch.randn(self.nmax, self.nmax) * 0.02)
+
+        self.Aps = nn.Parameter(torch.randn(self.nmax) * 0.02)
+        self.Bps = nn.Parameter(torch.randn(self.nmax, self.nmax) * 0.02)
+
+        self.coarse_q = nn.Linear(d_model, d_model // 4, bias=False)
+        self.coarse_k = nn.Linear(d_model, d_model // 4, bias=False)
+        self.coarse_gate_scale = nn.Parameter(torch.tensor(1.0))
+
+        self.conv = nn.Conv1d(d_model, d_model, kernel_size=k, padding=k // 2, groups=d_model)
+        self.out_gate = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(0.1)
+
+    def _mask_params(self, A, Bp):
+        A = torch.tril(A, diagonal=-1)
+        Bp = torch.tril(Bp)
+        return A, Bp
+
+    def single_level(self, X, A, B, Ap, Bp):
+        Y = _kronecker_batch_matmul_einsum(A, B, X) + \
+            _kronecker_batch_matmul_diagonal_einsum(Ap, Bp, X)
+        return Y
+
+    def compute_dynamic_A(self, X, n, A_static):
+        """
+        Computes a dynamic modulation for the coarse matrix A.
+        X: [B, L, d]
+        """
+        B_size, L, d = X.shape
+
+        X_pad = X
+
+        X_coarse = X_pad.view(B_size, n, n, d).mean(dim=2)
+        q = self.coarse_q(X_coarse)
+        k = self.coarse_k(X_coarse)
+        attn_scores = torch.bmm(q, k.transpose(1, 2)) * self.coarse_gate_scale
+
+        dynamic_gate = torch.sigmoid(attn_scores)
+
+        A_dynamic = A_static.unsqueeze(0) * dynamic_gate
+
+        return A_dynamic
+
+    def forward(self, X):
+        B_size, L, d = X.shape
+        n = int((L ** 0.5) + 0.999999)
+
+        Bs = self.Bs[:n, :n]
+        Ap = self.Aps[:n]
+        A_static, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
+
+        X_conv = self.conv(X.transpose(1, 2)).transpose(1, 2)
+        X = F.gelu(X_conv)
+
+        A_dynamic = self.compute_dynamic_A(X, n, A_static)
+
+        Y = self.single_level(X, A_dynamic, Bs, Ap, Bp)
+
+        g = torch.sigmoid(self.out_gate(X))
+        out = Y * g + (1 - g) * X
+        out = self.dropout(out)
+
+        return out
+
+
 class KOBRA1(Layer):
     __name__ = "KroneckerMixer2"
     __complexity__ = 'O(sqrt(L) L d)'
@@ -227,7 +311,7 @@ class KOBRA1(Layer):
         self.conv = CausalConv1d(k=k, d_model=self.d_model)
         self.gate = nn.Linear(d_model, d_model)
         self.qk = nn.Linear(d_model, 2 * d_model)
-
+        self.scale = math.sqrt(d_model)
         self.dropout = nn.Dropout(0.1)
 
     def _mask_params(self, A, Bp):
@@ -242,7 +326,6 @@ class KOBRA1(Layer):
     def forward(self, X):
         b, L, d = X.shape
         q, k = self.qk(X).chunk(2, dim=-1)
-
         n = int((L ** 0.5) + 0.999999)
         B = self.Bs[:n, :n]
         Ap = self.Aps[:n]
@@ -253,13 +336,14 @@ class KOBRA1(Layer):
         X = self.single_level(X, A, B, Ap, Bp) * g + (1 - g) * X
 
         q = q.view(b * L, d).unsqueeze(1)
-        X = X.view(b * L, d).unsqueeze(-1)
+        k = k.view(b * L, d).unsqueeze(-1)
 
-        qx = (q @ X) / math.sqrt(self.d_model)
-        qx = qx.squeeze(-1).view(b, L, 1)
+        qk = (q @ k) * self.scale
+        qk = qk.squeeze(-1).view(b, L, 1)
 
-        X = k * qx
+        X = X * qk
         X = self.dropout(X)
+
         return X  # [:, :L, :]
 
 class QKVKroneckerMixer(Layer):
