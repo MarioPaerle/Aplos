@@ -246,6 +246,7 @@ class KOBRA1(Layer):
         B = self.Bs[:n, :n]
         Ap = self.Aps[:n]
         A, Bp = self._mask_params(self.As[:n, :n], self.Bps[:n, :n])
+
         X = F.gelu(self.conv(X))
         g = torch.sigmoid(self.gate(X))
         X = self.single_level(X, A, B, Ap, Bp) * g + (1 - g) * X
@@ -331,16 +332,18 @@ if __name__ == '__main__':
 
     model = SequenceModel(
         vocab_size=10,
-        d_model=512,
-        n_layers=4,
-        max_len=1024,
+        d_model=128,
+        n_layers=5,
+        max_len=2116,
         pos_encoder=True,
-        embedder=Embedder,
+        embedder=EasyEmbedder,
         unembedder=UnbiasedLinear,
         channel_mixer=MLP,
-        channel_args={"expand": 2, "depth": 2, "activation": nn.GELU},
-        spatial_mixer=hybrid,
-        spatial_args=hybrid_params,
+        channel_args={'expand': 2, 'activation': SwiGLU, 'depth': 2},
+        rope=False,
+        # pad='sqrt'
+        spatial_mixer=KOBRA1,
+        spatial_args={'max_len': 2116, 'k': 8}
     )
     model.summary()
     out = model(X)
