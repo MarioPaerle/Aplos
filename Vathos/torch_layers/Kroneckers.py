@@ -251,16 +251,15 @@ class KOBRA1(Layer):
         X = F.gelu(self.conv(X))
         g = torch.sigmoid(self.gate(X))
         X = self.single_level(X, A, B, Ap, Bp) * g + (1 - g) * X
-        X = self.dropout(X)
 
         q = q.view(b * L, d).unsqueeze(1)
         X = X.view(b * L, d).unsqueeze(-1)
 
-        qx = q @ X
+        qx = (q @ X) / math.sqrt(self.d_model)
         qx = qx.squeeze(-1).view(b, L, 1)
 
         X = k * qx
-
+        X = self.dropout(X)
         return X  # [:, :L, :]
 
 class QKVKroneckerMixer(Layer):
