@@ -346,6 +346,7 @@ class KOBRA1(Layer):
 
         return X  # [:, :L, :]
 
+
 class QKVKroneckerMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L sqrt(L) d^2)"

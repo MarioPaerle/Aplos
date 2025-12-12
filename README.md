@@ -19,6 +19,7 @@ and APLOS will automatically become colorful!
 # Vathos
 Vathos is a python library built on PyTorch whose aim is to accelerate the building of good level models for researchers, 
 exploiting the repeating structure of Deep Learning architectures.
+It tries to preserve customizability while accelerating the coding experience. 
 
 I'm making this library firstly for my self, since I felt I needed an easier way, to implement famous architectures, with a high grade
 of customization, across all of my project, creating a sort of standard.
@@ -29,7 +30,7 @@ of customization, across all of my project, creating a sort of standard.
 ---
 
 ### To Start
-Here's a simple implementation of an AR (Causal) Transformer:
+Here's a simple implementation of an AR (Causal) Transformer completely compatible with torch:
 
 ```python
 from Vathos.blocks import *
@@ -45,18 +46,24 @@ model = SequenceModel(vocab_size=VOCAB_SIZE,
                       channel_args={"expand": 2, "activation": SwiGLU, "depth": 2}
                       ).to(device)
 ```
-This will give you a Vathos Layer object, which is actually a nn.Module object, which will easily adapt to your existing code, since it 
+This will give you a Vathos **Layer** object, which is actually a **nn.Module** object, which will easily adapt to your existing code, since it 
 behave exaclty as a torch object.
 Note that in this example a specific channel mixer is provided 'MLP' and its params are passed via a dict.
 Same thing could've been done for the spatial mixer, which by default is a MultiHeadAttention.
 More Details in the github wiki.
+
+An Inference Example for this Auto-Regressive Transformer:
+```python
+model.generate(torch.tensor([0]), 1000, temperature=0.75, token_end=None, custom_generate=False)
+```
+
 > [!IMPORTANT] 
-> Please Note that for now Vathos _SequenceModel_ is not ready for efficient inference algorithm, as its native 
-> _generate()_ function is simply calling the forward. 
-> KV Caching and other inference acceleration are in plan.
+> Please Note that for now Vathos _SequenceModel_ is not completely ready for efficient inference algorithm.
+> the SequenceModel.generate(... custom_generate=True) looks, into each spatial_mixer and channel_mixer, for a custom generate() method
+> and fallbacks to the forward if it does not find any.
 
 ---
-### Vathos Model class uses
+### Vathos Model class Uses
 Vathos Model class can be used also to track losses, metrics[WIP] and has a built-in profiling system.
 Each Vathos Layer automatically keeps track of its timing internally, and can access to sublayers timers.
 An example of Sequence Models summary obtained by 
@@ -67,11 +74,45 @@ model.summary()
 
 An example of Models Profiling Print and Plot obtained by 
 ```python
-model.profile(avg=True, plot=True)
+model.register_sublayers() # builds the graph of model Layers
+model.profile(avg=True, plot=True) # Shows metrics for nodes of the graph, and plots them.
 ```
 ![profiling_example.png](imgs%2Fprofiling_example.png)
 ![profiler_plot.png](imgs%2Fprofiler_plot.png)
+
+## Saving and Loading VathosModels
+```python
+model.save_checkpoint('your_checkpoint_name.pt')
+model.load_checkpoint('your_checkpoint_name.pt')
+```
+
+## Metrics Losses and training managment
+```python
+# in training pseudocode:
+
+for epoch in range(num_epochs):
+    ...
+    for x in val_dataloader:
+        loss = yourlossfunction(model(input), target)
+        model.register_loss(loss.item())
+        model.register_metrics({'metric1': metric1(model(input)), 'metric2': metric2(model(input), target)}) # be sure output is a number
+
+    model.register_epoch() # This computes the average on the epoch step for both metrics and loss.
+
+# After training
+model.plot_losses() # shows the plot of losses
+model.plot_metrics() # shows the plot of losses and all metrics [WIP]
+```
+
+
+
+> [WARNING!]
+> `model.save_state_dict()` works as expected for the model parameters, but is not saving losses, metrics, and profiling attributes!
+
+
+
 ---
+
 ### FLA Integration Example
 
 here's an example on how to create a Vathos Layer compatible mixer, by wrapping FLA library.

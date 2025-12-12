@@ -800,28 +800,32 @@ class VathosModel(Layer):
                 self._metrics[metric].append(metrics[metric])
                 self._metrics_this_epoch[metric].append(metrics[metric])
             else:
-                flag(f"Registring a new metric {metric}")
+                flag(f"Registering a new metric {metric}")
                 self._metrics[metric] = [metrics[metric]]
                 self._metrics_this_epoch[metric] = [metrics[metric]]
+
 
     def register_epoch(self):
         self.epochs += 1
         self._losses_per_epoch.append(np.mean(self._losses_this_epoch))
         self._losses_per_epoch_dict[self.steps] = np.mean(self._losses_this_epoch)
         self._losses_this_epoch = []
+
         for metric in self._metrics_this_epoch:
             if metric in self._metrics_per_epoch:
                 self._metrics_per_epoch[metric].append(np.mean(self._metrics_this_epoch[metric]))
-                self._metrics_this_epoch[metric] = []
             else:
-                pass
+                self._metrics_per_epoch[metric] = [np.mean(self._metrics_this_epoch[metric])]
+            self._metrics_this_epoch[metric] = []
 
-        if self._losses_per_epoch[-1] < self.best_loss and self.autosave:
-            self.checkpoints += 1
-            if self.autosave_overwrite:
-                self.save_state_dict(f'{self.name}-checkpoint.pt')
-            else:
-                self.save_state_dict(f'{self.name}-checkpoint-{self.checkpoints}.pt')
+        if self._losses_per_epoch[-1] < self.best_loss:
+            self.best_loss = self._losses_per_epoch[-1]
+            if self.autosave:
+                self.checkpoints += 1
+                if self.autosave_overwrite:
+                    self.save_checkpoint(f'{self.name}-checkpoint.pt')
+                else:
+                    self.save_checkpoint(f'{self.name}-checkpoint-{self.checkpoints}.pt')
 
     def save_state_dict(self, path):
         torch.save(self.state_dict(), path)
@@ -841,6 +845,113 @@ class VathosModel(Layer):
         plt.ylabel("loss")
         plt.title("Model Losses per Steps")
         plt.show()
+
+    def plot_metrics(self, figsize=(12, 8)):
+        """Plot all losses and metrics in subplots"""
+        # Count how many plots we need: 1 for losses + number of metrics
+        n_metrics = len(self._metrics_per_epoch)
+        n_plots = 1 + n_metrics
+
+        # Calculate grid dimensions
+        n_cols = 2
+        n_rows = (n_plots + 1) // 2  # Ceiling division
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+
+        # Flatten axes array for easier indexing
+        if n_plots == 1:
+            axes = np.array([axes])
+        else:
+            axes = axes.flatten()
+
+        # Plot losses in first subplot
+        ax = axes[0]
+        ax.plot(
+            list(self._losses_dict.keys()),
+            list(self._losses_dict.values()),
+            label="Losses", linewidth=1, alpha=0.6)
+        ax.plot(
+            list(self._losses_per_epoch_dict.keys()),
+            list(self._losses_per_epoch_dict.values()),
+            label="Losses Per Epoch", linewidth=2)
+        ax.set_xlabel("Steps")
+        ax.set_ylabel("Loss")
+        ax.set_title("Training Loss")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Plot each metric in subsequent subplots
+        for idx, (metric_name, metric_values) in enumerate(self._metrics_per_epoch.items(), start=1):
+            ax = axes[idx]
+
+            # Plot per-step values if available
+            if metric_name in self._metrics and len(self._metrics[metric_name]) > 0:
+                # Create step indices for metrics (assuming they align with training steps)
+                step_indices = list(range(len(self._metrics[metric_name])))
+                ax.plot(step_indices, self._metrics[metric_name],
+                        label=f"{metric_name}", linewidth=1, alpha=0.6)
+
+            # Plot per-epoch values
+            epoch_indices = list(range(len(metric_values)))
+            ax.plot(epoch_indices, metric_values,
+                    label=f"{metric_name} Per Epoch", linewidth=2, marker='o')
+
+            ax.set_xlabel("Steps/Epochs")
+            ax.set_ylabel(metric_name)
+            ax.set_title(f"Metric: {metric_name}")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        # Hide any unused subplots
+        for idx in range(n_plots, len(axes)):
+            axes[idx].set_visible(False)
+
+        plt.tight_layout()
+        plt.show()
+
+    def save_checkpoint(self, path):
+        """Save complete model checkpoint including training state"""
+        checkpoint = {
+            'model_state_dict': self.state_dict(),
+            'losses': self._losses,
+            'losses_dict': self._losses_dict,
+            'losses_per_epoch': self._losses_per_epoch,
+            'losses_per_epoch_dict': self._losses_per_epoch_dict,
+            'losses_this_epoch': self._losses_this_epoch,
+            'metrics': self._metrics,
+            'metrics_this_epoch': self._metrics_this_epoch,
+            'metrics_per_epoch': self._metrics_per_epoch,
+            'best_loss': self.best_loss,
+            'checkpoints': self.checkpoints,
+            'steps': self.steps,
+            'steps_per_epoch': self.steps_per_epoch,
+            'epochs': self.epochs,
+            'autosave': self.autosave,
+            'autosave_overwrite': self.autosave_overwrite,
+        }
+        torch.save(checkpoint, path)
+
+    def load_checkpoint(self, path):
+        """Load complete model checkpoint including training state"""
+        checkpoint = torch.load(path)
+        self.load_state_dict(checkpoint['model_state_dict'])
+
+        # Restore training state
+        self._losses = checkpoint['losses']
+        self._losses_dict = checkpoint['losses_dict']
+        self._losses_per_epoch = checkpoint['losses_per_epoch']
+        self._losses_per_epoch_dict = checkpoint['losses_per_epoch_dict']
+        self._losses_this_epoch = checkpoint['losses_this_epoch']
+        self._metrics = checkpoint['metrics']
+        self._metrics_this_epoch = checkpoint['metrics_this_epoch']
+        self._metrics_per_epoch = checkpoint['metrics_per_epoch']
+        self.best_loss = checkpoint['best_loss']
+        self.checkpoints = checkpoint['checkpoints']
+        self.steps = checkpoint['steps']
+        self.steps_per_epoch = checkpoint['steps_per_epoch']
+        self.epochs = checkpoint['epochs']
+        self.autosave = checkpoint['autosave']
+        self.autosave_overwrite = checkpoint['autosave_overwrite']
 
 
 ########################################################################################################################
@@ -1293,8 +1404,11 @@ if __name__ == "__main__":
 
     model.summary()
     model.profile()
-    model.profile(avg=True, plot=True)
     model.autosave = False
     model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=False)
+    model.profile(avg=True, plot=True)
 
+    model.save_checkpoint('caroler.pt')
+    model.load_checkpoint('caroler.pt')
     model.plot_losses()
+    model.profile(avg=True, plot=True)
