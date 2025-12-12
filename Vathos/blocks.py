@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 
-
 class Block1d(Layer):
     def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, norm=nn.LayerNorm):
         super().__init__()
@@ -813,7 +812,6 @@ class VathosModel(Layer):
                 self._metrics[metric] = [metrics[metric]]
                 self._metrics_this_epoch[metric] = [metrics[metric]]
 
-
     def register_epoch(self):
         self.epochs += 1
         self._losses_per_epoch.append(np.mean(self._losses_this_epoch))
@@ -1165,6 +1163,8 @@ class SequenceModel(VathosModel):
         return torch.multinomial(probs, num_samples=1)
 
     def generate(self, *args, **kwargs):
+        if not 'custom_generate' in kwargs:
+            kwargs['custom_generate'] = False
         if kwargs['custom_generate']:
             del kwargs['custom_generate']
             return self.custom_generate(*args, **kwargs)

@@ -40,28 +40,24 @@ class LocalCausalFlexAttention(Layer):
         self.window_size = window_size
         self.use_rope = rope
 
-        # Projection Layers
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
 
-        # Components
         self.rope = RoPE(self.head_dim) if rope else None
         self.dropout = nn.Dropout(dropout)
 
-        # Flex Attention Setup
         self.use_flex_attention = FLEX_ATTENTION_AVAILABLE
         self._cached_block_mask = None
         self._cached_seq_len = 0
 
-        # Internal State for SequenceModel generation
+        # State for generation
         self.kv_cache = None
+        self.decoding_pos = 0  # <--- NEW: Tracks absolute position irrespective of cache size
 
     def has_custom_generate(self):
-        """Signals to Block1d that this layer has a specialized generation method"""
         return True
 
     def _get_local_mask_mod(self):
-        """Returns the mask function for create_block_mask"""
         w = self.window_size
 
         def local_causal(b, h, q_idx, kv_idx):
@@ -70,25 +66,14 @@ class LocalCausalFlexAttention(Layer):
         return local_causal
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Standard Forward Pass (Prefill / Training).
-        Uses FlexAttention with Sparse Block Mask if available.
-        """
         B, L, D = x.shape
-
-        # (B, L, 3, H, D_head)
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-
-        # FlexAttention requires (B, H, L, D_head) usually, but we permute to standard logic first
-        # Layout: (3, B, H, L, D_head) -> (B, H, L, D_head)
         q, k, v = qkv.permute(2, 0, 3, 1, 4).contiguous()
 
-        # Apply RoPE (Absolute positions 0 to L)
         if self.use_rope:
             q, k = self.rope(q, k, start_pos=0)
 
         if self.use_flex_attention:
-            # Efficient Block Mask Caching for fixed sized batches/seqs
             if self._cached_block_mask is None or self._cached_seq_len != L:
                 self._cached_block_mask = create_block_mask(
                     self._get_local_mask_mod(),
@@ -97,88 +82,88 @@ class LocalCausalFlexAttention(Layer):
                 )
                 self._cached_seq_len = L
 
-            # Pass 1: Flex Attention
             attn_output = flex_attention(q, k, v, block_mask=self._cached_block_mask)
         else:
-            # Pass 2: Fallback (Heavy Memory Usage Warning)
             attn_output = self._fallback_attention(q, k, v)
 
-        # Reshape output: (B, H, L, D_head) -> (B, L, D)
         attn_output = attn_output.transpose(1, 2).reshape(B, L, D)
         return self.out(self.dropout(attn_output))
 
     def generate(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Generation Step (Decode).
-        Uses Standard SDPA + Rolling KV Cache (Internal State).
+        Generation Step (Decode) with Sliding Window Cache.
         """
-        B, L, D = x.shape  # L is typically 1 here
+        B, L, D = x.shape
 
         # 1. Project
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (B, H, 1, D_head)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
-        # 2. Manage Cache State
+        # 2. Determine Absolute Position for RoPE
+        # Use our persistent counter instead of cache shape
         if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
-            # Pos offset is the current length of cache (for RoPE)
-            # Note: With rolling cache, absolute pos might drift from cache len,
-            # but for local window RoPE, relative distance matters most.
-            # If strict absolute position is needed, SequenceModel needs to pass `pos` in.
-            # Vathos usually relies on standard RoPE appending.
-            pos_offset = k_cache.shape[2]
+            pos_offset = self.decoding_pos
         else:
-            k_cache, v_cache = None, None
             pos_offset = 0
 
-        # 3. Apply RoPE
+        # 3. Apply RoPE (Rotates based on absolute position)
         if self.use_rope:
             q, k = self.rope(q, k, start_pos=pos_offset)
 
-        # 4. Update Rolling Cache
-        if k_cache is not None:
+        # 4. Update Cache
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
 
-        # *** ROLLING WINDOW LOGIC ***
-        # Physically delete old tokens from VRAM to keep O(1) memory during generation
+        # 5. Sliding Window Trim
+        # We physically remove old tokens to keep VRAM usage constant O(w)
         if k.size(2) > self.window_size:
             k = k[:, :, -self.window_size:, :]
             v = v[:, :, -self.window_size:, :]
 
-        # Save to internal state
         self.kv_cache = (k, v)
+        self.decoding_pos += L  # Increment absolute counter
 
-        # 5. Attention (SDPA)
-        # We don't need a mask because we physically trimmed the cache to the window.
-        # We attend to everything currently in self.kv_cache
+        # 6. Attention
+        # If L > 1 (Prompt Prefill), we MUST use causal masking.
+        # If L == 1 (Generation), we attend to entire (windowed) cache, so no mask needed.
+        use_causal = self.causal and (L > 1)
+
+        # Note: If L > 1 and L > window_size, SDPA with is_causal=True works fine
+        # on the windowed cache because the cache contains the tail of the prompt.
+
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
-            is_causal=False,  # Cache is already past-only
+            is_causal=use_causal,
             dropout_p=0.0
         )
 
-        # 6. Output Projection
         attn_output = attn_output.transpose(1, 2).reshape(B, L, D)
         return self.out(attn_output)
 
     def _fallback_attention(self, q, k, v):
         """Fallback for when FlexAttention is missing. Uses dense mask."""
         L = q.size(2)
-        # Create dense boolean mask (O(L^2) memory!)
+        # Create dense boolean mask
+        # 1. Causal Mask (Lower Triangular)
         mask = torch.ones(L, L, device=q.device, dtype=torch.bool).tril()
+        # 2. Local Window Mask (Remove far history)
+        # Keep elements where (i - j) < w  =>  j > i - w
         local_mask = torch.ones(L, L, device=q.device, dtype=torch.bool).triu(-self.window_size + 1)
-        mask = mask & local_mask
+
+        final_mask = mask & local_mask
 
         return F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=mask,
+            attn_mask=final_mask,
             dropout_p=self.dropout.p if self.training else 0.0
         )
 
     def clear_cache(self):
-        """Called by SequenceModel before/after generation"""
+        """Reset cache and position counter"""
         self.kv_cache = None
+        self.decoding_pos = 0
 
 
 if __name__ == '__main__':

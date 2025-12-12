@@ -65,7 +65,7 @@ def symbolic_1d_ar_target_train(model, train_loader, val_loader, optimizer, sche
 
 
 def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, scheduler, criterion,
-                                      device, NUM_EPOCHS=100, use_amp=False, CLIP_NORM=1.0, spe=1000):
+                                      device, NUM_EPOCHS=100, use_amp=False, CLIP_NORM=1.0, spe=1000, val_steps=float('inf')):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     steps_per_epoch = spe
@@ -106,11 +106,14 @@ def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, s
 
         model.eval()
         val_loss = 0.0
-        # with torch.no_grad():
-        if True:
+        with torch.no_grad():
+        # if True:
+            val_s = 0
             for batch_x in tqdm(val_loader, desc=f"Epoch {epoch + 1}/{NUM_EPOCHS} Val"):
                 batch_x = batch_x['input_ids'].to(device).requires_grad_(False)
-
+                val_s += 1
+                if val_s >= val_steps:
+                    break
                 logits = model(batch_x)
                 loss = criterion(
                     logits[:, :-1, :].reshape(-1, logits.size(-1)),
