@@ -87,7 +87,7 @@ model.load_checkpoint('your_checkpoint_name.pt')
 ```
 > [!WARNING]
 > `model.save_state_dict()` works as expected for the model parameters, but is not saving losses, metrics, and profiling attributes!
-> please use `model.save_checkpoint`
+> please use `model.save_checkpoint()` instead
 
 ## Metrics Losses and training managment
 ```python
