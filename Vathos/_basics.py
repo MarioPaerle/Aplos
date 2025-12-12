@@ -271,7 +271,7 @@ class Layer(nn.Module):
         return elapsed, rets
 
     def generate(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
+        return None
 
     def has_custom_generate(self):
         """Check if this layer has overridden the generate method"""

@@ -362,23 +362,33 @@ class MultiheadAttentionMixer(Layer):
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
+        # 1. Handle Cache Offset
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
             pos_offset = k_cache.shape[2]
         else:
             pos_offset = 0
+            k_cache, v_cache = None, None
 
+        # 2. Apply RoPE (Rotates the *new* q and k relative to history)
         if self.rope is not None:
             q, k = self.rope(q, k, start_pos=pos_offset)
 
-        if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
+        # 3. Update Cache
+        if k_cache is not None:
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
 
+        # Save updated cache
         self.kv_cache = (k, v)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        # 4. Attention with Dynamic Masking
+        # If L > 1, we are processing a prompt (Prefill), so we MUST be causal.
+        # If L == 1, we are generating a token step-by-step, attending to the whole history.
+        use_causal = self.causal and (L > 1)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
+
         attn = attn.transpose(1, 2).reshape(B, L, D)
         attn = self.dropout(attn)
         return self.out(attn)
@@ -1132,76 +1142,106 @@ class SequenceModel(VathosModel):
 
         return x[:, :L, :]
 
+    def _sample_token(self, logits, temperature=1.0, top_p=1.0, top_k=None):
+        logits = logits / (temperature + 1e-8)
+
+        if top_k is not None and top_k > 0:
+            top_k = min(top_k, logits.size(-1))
+            v, _ = torch.topk(logits, top_k)
+            logits[logits < v[:, [-1]]] = float('-inf')
+
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            logits[indices_to_remove] = float('-inf')
+
+        probs = F.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1)
+
+    def generate(self, *args, **kwargs):
+        if kwargs['custom_generate']:
+            del kwargs['custom_generate']
+            return self.custom_generate(*args, **kwargs)
+        else:
+            del kwargs['custom_generate']
+            return self.simple_generate(*args, **kwargs)
+
     @torch.no_grad()
-    def generate(self, prompt, max_length=512, temperature=0.8, top_p=0.9, token_end=0, custom_generate=True):
-        """Generate text autoregressively using KV caching when available"""
+    def simple_generate(self, prompt: torch.Tensor, max_len=100, temperature=1.0, top_p=1.0, top_k=50, token_end=None):
         self.eval()
         if prompt.dim() == 1:
             prompt = prompt.unsqueeze(0)
 
         generated = prompt.clone()
+
+        pbar = tqdm(range(max_len), desc="Simple Gen")
+        for _ in pbar:
+            logits = self.forward(generated, unembed=True)
+
+            next_token_logits = logits[:, -1, :]
+            next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
+
+            generated = torch.cat([generated, next_token], dim=1)
+
+            if token_end is not None and (next_token == token_end).all():
+                break
+
+        return generated
+
+    @torch.no_grad()
+    def custom_generate(self, prompt: torch.Tensor, max_len=100, temperature=1.0, top_p=1.0, top_k=50, token_end=None):
+        self.eval()
         self._clear_all_caches()
 
-        x = self.embedder(generated) * self.embed_scale
+        if prompt.dim() == 1:
+            prompt = prompt.unsqueeze(0)
 
-        # For positional encoding during first pass
-        if isinstance(self.pos_encoder, SinusoidalPositionalEncoding):
-            x = self.pos_encoder(x)
-        else:
+        x = self.embedder(prompt) * self.embed_scale
+        if self.pos_encoder is not None and not isinstance(self.pos_encoder, nn.Identity):
             x = self.pos_encoder(x)
 
         for block in self.blocks:
-            if custom_generate and block.has_custom_generate():
+            if block.has_custom_generate():
                 x = block.generate(x)
             else:
                 x = block(x)
 
+        generated = prompt.clone()
+
         logits = self.unembedder(x)
-        next_token_logits = logits[:, -1, :] / temperature
-
-        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-        sorted_indices_to_remove[:, 0] = 0
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-        next_token_logits[indices_to_remove] = float('-inf')
-
-        probs = F.softmax(next_token_logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
+        next_token_logits = logits[:, -1, :]
+        next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
         generated = torch.cat([generated, next_token], dim=1)
 
-        for step in tqdm(range(max_length - 1)):
-            x = self.embedder(next_token) * self.embed_scale
+        pbar = tqdm(range(max_len - 1), desc="Fast Gen")
+        for _ in pbar:
+            x_t = self.embedder(next_token) * self.embed_scale
+            current_pos = generated.shape[1] - 1
 
             if isinstance(self.pos_encoder, SinusoidalPositionalEncoding):
-                current_pos = generated.shape[1] - 1
-                x = x + self.pos_encoder.pe[current_pos:current_pos + 1].unsqueeze(0)
-            else:
-                x = self.pos_encoder(x)
+                pe_slice = self.pos_encoder.pe[current_pos: current_pos + 1].unsqueeze(0)
+                x_t = x_t + pe_slice
 
             for block in self.blocks:
-                if custom_generate and block.has_custom_generate():
-                    x = block.generate(x)
+                if block.has_custom_generate():
+                    x_t = block.generate(x_t)
                 else:
-                    x = block(x)
+                    x_t = block(x_t)
 
-            logits = self.unembedder(x)
-            next_token_logits = logits[:, -1, :] / temperature
+            logits = self.unembedder(x_t)
+            next_token_logits = logits[:, -1, :]
 
-            sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-            sorted_indices_to_remove[:, 0] = 0
-            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-            next_token_logits[indices_to_remove] = float('-inf')
+            next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
 
-            probs = F.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 
-            if next_token.item() == token_end:
+            if token_end is not None and (next_token == token_end).all():
                 break
 
         self._clear_all_caches()
@@ -1404,7 +1444,7 @@ if __name__ == "__main__":
     model.summary()
     model.profile()
     model.autosave = False
-    model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=False)
+    model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=True)
     model.profile(avg=True, plot=True)
 
     model.save_checkpoint('caroler.pt')
