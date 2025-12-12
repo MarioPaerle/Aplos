@@ -106,7 +106,7 @@ model.plot_metrics() # shows the plot of losses and all metrics [WIP]
 
 
 
-> [WARNING!]
+> [!WARNING]
 > `model.save_state_dict()` works as expected for the model parameters, but is not saving losses, metrics, and profiling attributes!
 
 
