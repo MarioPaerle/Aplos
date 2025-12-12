@@ -12,8 +12,8 @@ import re
 from Vathos.complexity import combine_big_o_product, combine_big_o_sum
 import math
 import torch.nn.functional as F
-
 from tqdm import tqdm
+
 
 
 class Block1d(Layer):
@@ -386,7 +386,6 @@ class MultiheadAttentionMixer(Layer):
     def clear_cache(self):
         self.kv_cache = None
 
-# TODO: Local Attention
 
 class MultiheadLatentAttentionMixer(Layer):
     __name__ = "MultiheadLatentAttentionMixer"

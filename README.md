@@ -74,7 +74,7 @@ model.summary()
 
 An example of Models Profiling Print and Plot obtained by 
 ```python
-model.register_sublayers() # builds the graph of model Layers
+model.register_sublayers() # builds the graph of model Layers, usually automatically done at the first .profile() call
 model.profile(avg=True, plot=True) # Shows metrics for nodes of the graph, and plots them.
 ```
 ![profiling_example.png](imgs%2Fprofiling_example.png)
