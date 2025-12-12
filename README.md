@@ -85,6 +85,9 @@ model.profile(avg=True, plot=True) # Shows metrics for nodes of the graph, and p
 model.save_checkpoint('your_checkpoint_name.pt')
 model.load_checkpoint('your_checkpoint_name.pt')
 ```
+> [!WARNING]
+> `model.save_state_dict()` works as expected for the model parameters, but is not saving losses, metrics, and profiling attributes!
+> please use `model.save_checkpoint`
 
 ## Metrics Losses and training managment
 ```python
@@ -103,12 +106,6 @@ for epoch in range(num_epochs):
 model.plot_losses() # shows the plot of losses
 model.plot_metrics() # shows the plot of losses and all metrics [WIP]
 ```
-
-
-
-> [!WARNING]
-> `model.save_state_dict()` works as expected for the model parameters, but is not saving losses, metrics, and profiling attributes!
-
 
 
 ---
