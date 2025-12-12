@@ -940,7 +940,7 @@ class VathosModel(Layer):
 
     def load_checkpoint(self, path):
         """Load complete model checkpoint including training state"""
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, weights_only=False)
         self.load_state_dict(checkpoint['model_state_dict'])
 
         # Restore training state
