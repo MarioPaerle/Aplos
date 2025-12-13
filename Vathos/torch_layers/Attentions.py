@@ -166,6 +166,58 @@ class LocalCausalFlexAttention(Layer):
         self.decoding_pos = 0
 
 
+class HybridLocalAttn(Layer):
+    __name__ = "HybridLocalAttn"
+    __complexity__ = "O(L d^2 + L * w * d)"
+
+    def __init__(
+            self,
+            d_model: int,
+            secondary_mixer: Layer,
+            sec_params: dict,
+            window_size: int = 256,
+            n_heads: int = 8,
+            rope: bool = False,
+            dropout: float = 0.1
+    ):
+        super().__init__()
+        self.sec_mixer = secondary_mixer(d_model=d_model, **sec_params)
+        self.attn = LocalCausalFlexAttention(
+            d_model=d_model,
+            n_heads=n_heads,
+            window_size=window_size,
+            rope=rope,
+            dropout=dropout,
+            causal=True
+        )
+
+    def has_custom_generate(self):
+        return True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.sec_mixer(x)
+        x = self.attn(x)
+
+        return x
+
+    def generate(self, x: torch.Tensor) -> torch.Tensor:
+        if hasattr(self.sec_mixer, 'generate') and hasattr(self.sec_mixer,
+                                                           'has_custom_generate') and self.sec_mixer.has_custom_generate():
+            x = self.sec_mixer.generate(x)
+        else:
+            x = self.sec_mixer(x)
+
+        x = self.attn.generate(x)
+
+        return x
+
+    def clear_cache(self):
+        self.attn.clear_cache()
+        if hasattr(self.sec_mixer, 'clear_cache'):
+            self.sec_mixer.clear_cache()
+
+
+
 if __name__ == '__main__':
     x = torch.randint(0, 9, size=(2, 64))
     """y = pe(img)
