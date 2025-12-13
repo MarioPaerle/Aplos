@@ -36,9 +36,11 @@ class Layer(nn.Module):
         self._times = []
         self._sublayers = None
 
+    @torch.compiler.disable
     def start_timer(self):
         self._tstart = timer()
 
+    @torch.compiler.disable
     def end_timer(self, batch_size):
         self._tend = timer()
         self._time = (self._tend - self._tstart) / batch_size
@@ -100,6 +102,9 @@ class Layer(nn.Module):
             return rets
         else:
             return self.forward(*args, **kwargs)
+
+    def force_simple_call(self):
+        self.__call__ = self.forward
 
     def __repr__(self):
         a = f"{SEC}Vathos{RES}: "
