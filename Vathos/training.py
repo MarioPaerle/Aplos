@@ -119,10 +119,9 @@ def symbolic_1d_ar_input_ids_train(model, train_loader, val_loader, optimizer, s
                     logits[:, :-1, :].reshape(-1, logits.size(-1)),
                     batch_x[:, 1:].reshape(-1)
                 )
-                val_loss += loss.item()
                 model.module.register_loss(loss.item())
 
-        val_avg = val_loss / len(val_loader)
+        val_avg = model.module.get_mean_loss()
         model.module.register_epoch()
         print(f"Epoch {epoch + 1} val avg loss: {val_avg:.4f}")
 
