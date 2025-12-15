@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from Vathos.blocks import *
-
+flag("This module is WIP, LocalCausalFlexAttention is broken") # TODO
 try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
     FLEX_ATTENTION_AVAILABLE = True
