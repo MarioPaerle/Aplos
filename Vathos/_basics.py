@@ -316,6 +316,18 @@ class Identity(Layer):
         return x
 
 
+class Skip(Layer):
+    __name__ = "Skip"
+    __complexity__ = "O(1)"
+
+    def __init__(self, layer):
+        super(Skip, self).__init__()
+        self.layer = layer
+
+    def forward(self, x):
+        return self.layer(x) + x
+
+
 class IdentityMixer(Layer):
     __name__ = "Identity"
     __complexity__ = "O(1)"
@@ -485,6 +497,50 @@ class DLPSoftmax(Layer):
         attn_weights = self.dropout(attn_weights)
 
         return self.contract(attn_weights)
+
+
+class FlashSDLP(nn.Module):
+    def __init__(self, d_model, m, num_heads, dropout=0.1, outproj=False):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.m = m
+        self.dropout_p = dropout
+
+        self.M1 = nn.Parameter(torch.randn(num_heads, m, self.head_dim))
+        self.M2 = nn.Parameter(torch.randn(num_heads, m, self.head_dim))
+
+        if outproj:
+            self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        else:
+            self.out_proj = Identity()
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_normal_(self.M1)
+        nn.init.xavier_normal_(self.M2)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+
+        q = x.view(batch_size, self.num_heads, 1, self.head_dim)
+        k = self.M1.unsqueeze(0).expand(batch_size, -1, -1, -1)
+        v = self.M2.unsqueeze(0).expand(batch_size, -1, -1, -1)
+        attn_output = F.scaled_dot_product_attention(
+            query=q,
+            key=k,
+            value=v,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False
+        )
+
+        attn_output = attn_output.view(batch_size, -1)
+
+        return self.out_proj(attn_output)
 
 
 class TiedDLPSoftmax(Layer):
