@@ -499,6 +499,11 @@ class DLPSoftmax(Layer):
         return self.contract(attn_weights)
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class FlashSDLP(nn.Module):
     def __init__(self, d_model, m, num_heads, dropout=0.1, outproj=False):
         super().__init__()
@@ -515,21 +520,25 @@ class FlashSDLP(nn.Module):
         if outproj:
             self.out_proj = nn.Linear(d_model, d_model, bias=False)
         else:
-            self.out_proj = Identity()
+            self.out_proj = nn.Identity()
 
         self._reset_parameters()
 
     def _reset_parameters(self):
         nn.init.xavier_normal_(self.M1)
         nn.init.xavier_normal_(self.M2)
-        nn.init.xavier_uniform_(self.out_proj.weight)
+
+        if isinstance(self.out_proj, nn.Linear):
+            nn.init.xavier_uniform_(self.out_proj.weight)
 
     def forward(self, x):
-        batch_size = x.shape[0]
+        batch_size, seq_len, _ = x.shape
 
-        q = x.view(batch_size, self.num_heads, 1, self.head_dim)
+        q = x.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
         k = self.M1.unsqueeze(0).expand(batch_size, -1, -1, -1)
         v = self.M2.unsqueeze(0).expand(batch_size, -1, -1, -1)
+
         attn_output = F.scaled_dot_product_attention(
             query=q,
             key=k,
@@ -537,8 +546,7 @@ class FlashSDLP(nn.Module):
             dropout_p=self.dropout_p if self.training else 0.0,
             is_causal=False
         )
-
-        attn_output = attn_output.view(batch_size, -1)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
 
         return self.out_proj(attn_output)
 
