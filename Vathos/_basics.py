@@ -466,6 +466,39 @@ class DLPGelu(Layer):
         return self.dropout(self.contract(F.gelu(self.expand(x))))
 
 
+class DLPSoftmax(Layer):
+    def __init__(self, d_model, m, dropout=0.1, copy=False):
+        super().__init__()
+        self.expand = nn.Linear(d_model, m, bias=False)
+        self.contract = nn.Linear(m, d_model, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+        if copy:
+            with torch.no_grad():
+                self.contract.weight.copy_(self.expand.weight.t())
+
+    def forward(self, x):
+        logits = self.expand(x)
+
+        attn_weights = logits.softmax(dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        return self.contract(attn_weights)
+
+
+class TiedDLPSoftmax(Layer):
+    def __init__(self, d_model, m, dropout=0.1):
+        super().__init__()
+        self.memory_bank = nn.Parameter(torch.randn(m, d_model))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        logits = torch.matmul(x, self.memory_bank.t())
+        attn = self.dropout(logits.softmax(dim=-1))
+        return torch.matmul(attn, self.memory_bank)
+
+
 class DLPSwiGLU(Layer):
     def __init__(self, d_model, expand, dropout=0.1):
         super().__init__()
