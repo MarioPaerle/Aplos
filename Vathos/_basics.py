@@ -36,11 +36,9 @@ class Layer(nn.Module):
         self._times = []
         self._sublayers = None
 
-    @torch.compiler.disable
     def start_timer(self):
         self._tstart = timer()
 
-    @torch.compiler.disable
     def end_timer(self, batch_size):
         self._tend = timer()
         self._time = (self._tend - self._tstart) / batch_size
@@ -483,6 +481,7 @@ class DLPSoftmax(Layer):
         super().__init__()
         self.expand = nn.Linear(d_model, m, bias=False)
         self.contract = nn.Linear(m, d_model, bias=False)
+        self.scaler = nn.Parameter(torch.tensor([1.0]))
 
         self.dropout = nn.Dropout(dropout)
 
@@ -491,7 +490,7 @@ class DLPSoftmax(Layer):
                 self.contract.weight.copy_(self.expand.weight.t())
 
     def forward(self, x):
-        logits = self.expand(x)
+        logits = self.expand(x) * self.scaler
 
         attn_weights = logits.softmax(dim=-1)
         attn_weights = self.dropout(attn_weights)
