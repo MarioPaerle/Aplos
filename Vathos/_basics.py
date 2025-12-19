@@ -499,12 +499,7 @@ class DLPSoftmax(Layer):
         return self.contract(attn_weights)
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class FlashSDLP(nn.Module):
+class FlashSDLP(Layer):
     def __init__(self, d_model, m, num_heads, dropout=0.1, outproj=False):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
@@ -516,6 +511,8 @@ class FlashSDLP(nn.Module):
 
         self.M1 = nn.Parameter(torch.randn(num_heads, m, self.head_dim))
         self.M2 = nn.Parameter(torch.randn(num_heads, m, self.head_dim))
+
+        self.scaler = nn.Parameter(torch.tensor([1.0]))
 
         if outproj:
             self.out_proj = nn.Linear(d_model, d_model, bias=False)
@@ -540,7 +537,7 @@ class FlashSDLP(nn.Module):
         v = self.M2.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
         attn_output = F.scaled_dot_product_attention(
-            query=q,
+            query=q*self.scaler,
             key=k,
             value=v,
             dropout_p=self.dropout_p if self.training else 0.0,
