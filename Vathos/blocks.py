@@ -232,8 +232,6 @@ class ShortConvGatedMixer(Layer):
 #   TRANSFORMERS
 ########################################################################################################################
 
-# TODO: Needs fixe
-
 class SinusoidalPositionalEncoding(Layer):
     __name__ = "SinusoidalPositionalEncoding"
     __complexity__ = "O(L^2 d^2)"
@@ -1036,7 +1034,8 @@ class SequenceModel(VathosModel):
                  baseblock=Block1d,
                  baseblock_args=None,
                  dropout=0.1,
-                 weight_tying=False
+                 weight_tying=False,
+                 norm=nn.LayerNorm
                  ):
         super().__init__()
         self.pad = pad
@@ -1079,6 +1078,7 @@ class SequenceModel(VathosModel):
                 d_model=d_model,
                 channel_mixer=channel_mixer(d_model=d_model, **channel_args),
                 spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args),
+                norm=norm,
                 **baseblock_args
             )
             for _ in range(n_layers)
