@@ -321,7 +321,7 @@ class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d +  L d^2)"
 
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.1):
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
@@ -612,14 +612,15 @@ class EasyEmbedder(Layer):
     __name__ = "SymbolicEmbedder"
     __complexity__ = "O(L d)"
 
-    def __init__(self, vocab_size, d_model: int):
+    def __init__(self, vocab_size, d_model: int, dropout=0.13):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.embedding = nn.Embedding(vocab_size, d_model)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.embedding(x)
+        return self.dropout(self.embedding(x))
 
 
 class HybridAttentionBlock1d(Layer):

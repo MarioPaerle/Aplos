@@ -542,10 +542,21 @@ class FlashSDLP(Layer):
 
 
 class DLPSwiGLU(Layer):
-    def __init__(self, d_model, expand, dropout=0.1):
+    def __init__(self, d_model, expand, dropout=0.05):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand * 2, bias=True)
         self.contract = nn.Linear(d_model * expand, d_model, bias=True)
+        self.activation = SwiGLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+class UDLPSwiGLU(Layer):
+    def __init__(self, d_model, expand, dropout=0.05):
+        super().__init__()
+        self.expand = nn.Linear(d_model, d_model * expand * 2, bias=False)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=False)
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
 
