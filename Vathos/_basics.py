@@ -22,11 +22,12 @@ ACTIVS = {
 }
 PROFILE = True
 PROFILE_BATCHED = True
+FORCE_COMPILABILITY = False
 
 
-class Layer(nn.Module):
+class BasicLayer(nn.Module):
     def __init__(self):
-        super(Layer, self).__init__()
+        super(BasicLayer, self).__init__()
         self.complexity = "O(1)"
         self.__name__ = "BasicLayer"
         self._timer_unbatched = not PROFILE_BATCHED
@@ -279,6 +280,73 @@ class Layer(nn.Module):
     def has_custom_generate(self):
         """Check if this layer has overridden the generate method"""
         return type(self).generate is not Layer.generate
+
+
+class CompilableLayer(nn.Module):
+    def __init__(self):
+        super(CompilableLayer, self).__init__()
+        self.complexity = "O(1)"
+        self.__name__ = "BasicLayer"
+        self._timer_unbatched = not PROFILE_BATCHED
+        self._tstart = 0
+        self._tend = 0
+        self._time = 0
+        self._times = []
+        self._sublayers = None
+
+    def register_sublayers(self):
+        if self._sublayers is None:
+            self._sublayers = dict()
+
+        def get_unique_name(base_name, existing_names):
+            if base_name not in existing_names:
+                return base_name
+            counter = 1
+            while f"{base_name}_{counter}" in existing_names:
+                counter += 1
+            return f"{base_name}_{counter}"
+
+        def collect_layers(module, prefix="", level=0):
+            layers = []
+            for name, child in module.named_children():
+                if isinstance(child, Layer):
+                    layers.append((name, child, level))
+                    layers.extend(collect_layers(child, prefix=f"{name}.", level=level + 1))
+                elif isinstance(child, nn.ModuleList):
+                    for i, item in enumerate(child):
+                        if isinstance(item, Layer):
+                            layers.append((f"{name}[{i}]", item, level))
+                            layers.extend(collect_layers(item, prefix=f"{name}[{i}].", level=level + 1))
+                elif isinstance(child, nn.Module):
+                    layers.extend(collect_layers(child, prefix=f"{name}.", level=level))
+            return layers
+
+        all_layers = collect_layers(self)
+
+        for original_name, layer, level in all_layers:
+            class_name = type(layer).__name__
+            unique_name = get_unique_name(class_name, self._sublayers.keys())
+            self._sublayers[unique_name] = {'layer': layer, 'level': level}
+
+    def __repr__(self):
+        a = f"{SEC}Vathos{RES}: "
+        return a + super().__repr__()
+
+    def profile(self, maxlevel=100, avg=False, plot=False, plot_level=1):
+        flag("Profile is not activable if FORCE_COMPILABILITY=True")
+
+    def generate(self, *args, **kwargs):
+        return None
+
+    def has_custom_generate(self):
+        """Check if this layer has overridden the generate method"""
+        return type(self).generate is not Layer.generate
+
+
+if FORCE_COMPILABILITY:
+    Layer = CompilableLayer
+else:
+    Layer = BasicLayer
 
 
 class Builder:

@@ -394,7 +394,7 @@ class MultiheadAttentionMixer(Layer):
         self.kv_cache = None
 
 
-class MultiheadLatentAttentionMixer(nn.Module):  # Changed Layer to nn.Module for standard torch
+class MultiheadLatentAttentionMixer(Layer):  # Changed Layer to nn.Module for standard torch
     __name__ = "MultiheadLatentAttentionMixer"
     # Adjusted complexity notation
     __complexity__ = "O(L^2 d + L d * d_kv_lora)"
@@ -447,7 +447,7 @@ class MultiheadLatentAttentionMixer(nn.Module):  # Changed Layer to nn.Module fo
         return self.out(attn)
 
 
-class DecoupledSelfAttention(nn.Module):
+class MultiheadDecoupledAttention(Layer):
     __name__ = "DecoupledSelfAttention"
     __complexity__ = "O(L^2 * d_qk + L * d_model * (d_qk + d_v))"
 
@@ -477,7 +477,7 @@ class DecoupledSelfAttention(nn.Module):
         B, L, _ = x.shape
         H = self.n_heads
 
-        q, k = self.q_proj(x).view(B, L, H, self.qk_dim).transpose(1, 2).chunk(2, -1)
+        q, k = self.qk_proj(x).view(B, L, H, 2 * self.qk_dim).transpose(1, 2).chunk(2, -1)
 
         v = self.v_proj(x).view(B, L, H, self.v_dim).transpose(1, 2)
 
