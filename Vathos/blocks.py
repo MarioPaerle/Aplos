@@ -1156,7 +1156,7 @@ class SequenceModel(VathosModel):
             x = block(x)
 
         if unembed:
-            x = self.unembedder(x)
+            x = self.norm(self.unembedder(x))
 
         return x[:, :L, :]
 
