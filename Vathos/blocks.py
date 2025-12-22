@@ -1541,8 +1541,9 @@ if __name__ == "__main__":
         spatial_mixer=MultiheadAttentionMixer,
         spatial_args={'n_heads': 8, 'causal': True}
     )
+    # set_vathos_mode("debug")
+    model = torch.compile(model)
     out = model(x).detach()
-
     model.summary()
     model.profile()
     model.autosave = False
