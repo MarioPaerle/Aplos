@@ -6,6 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from Vathos.blocks import *
+import torch
+import torch.nn as nn
+from functools import lru_cache, partial
 
 flag("This module is WIP, LocalCausalFlexAttention is broken")  # TODO
 try:
@@ -18,15 +21,6 @@ except ImportError:
     flex_attention = None
     create_block_mask = None
 
-import torch
-import torch.nn as nn
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-from functools import lru_cache, partial
-
-
-# -----------------------------------------------------------------------------
-# 1. Define the Mask Modality at Global Scope
-# -----------------------------------------------------------------------------
 def _sliding_window_mask_logic(b, h, q_idx, kv_idx, window_size):
     """
     Pure logic for Sliding Window Attention.
@@ -36,9 +30,7 @@ def _sliding_window_mask_logic(b, h, q_idx, kv_idx, window_size):
     return (q_idx >= kv_idx) & ((q_idx - kv_idx) < window_size)
 
 
-# -----------------------------------------------------------------------------
-# 2. Production Level Layer
-# -----------------------------------------------------------------------------
+
 class LocalCausalFlexAttention(nn.Module):
     def __init__(
             self,
@@ -80,24 +72,30 @@ class LocalCausalFlexAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, D = x.shape
 
+
         qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
 
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        # 2. RoPE
         if self.use_rope:
             q, k = self.rope(q, k, start_pos=0)
 
         block_mask = self._get_block_mask(L, q.device)
-        out = flex_attention(
+
+        attn_out = flex_attention(
             q, k, v,
             block_mask=block_mask,
-            scale=1.0 / (self.head_dim ** 0.5),
-            enable_gqa=False
+            scale=1.0 / (self.head_dim ** 0.5)
         )
 
-        out = out.transpose(1, 2).reshape(B, L, self.d_model)
-        return self.out(out)
+        attn_out = attn_out.transpose(1, 2).reshape(B, L, D)
+        return self.out(attn_out)
 
 class HybridLocalAttn(Layer):
     __name__ = "HybridLocalAttn"
