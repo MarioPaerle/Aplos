@@ -30,8 +30,7 @@ def _sliding_window_mask_logic(b, h, q_idx, kv_idx, window_size):
     return (q_idx >= kv_idx) & ((q_idx - kv_idx) < window_size)
 
 
-
-class LocalCausalFlexAttention(nn.Module):
+class LocalCausalFlexAttention(Layer):
     def __init__(
             self,
             d_model: int,
@@ -55,26 +54,29 @@ class LocalCausalFlexAttention(nn.Module):
         self.rope = RoPE(self.head_dim) if rope else nn.Identity()
         self.use_rope = rope
 
+        self.kv_cache = None
+
     @lru_cache(maxsize=32)
-    def _get_block_mask(self, L, device):
+    def _get_block_mask(self, Q_LEN, KV_LEN, device):
         mask_mod = partial(_sliding_window_mask_logic, window_size=self.window_size)
 
         block_mask = create_block_mask(
             mask_mod,
             B=None,
             H=None,
-            Q_LEN=L,
-            KV_LEN=L,
+            Q_LEN=Q_LEN,
+            KV_LEN=KV_LEN,
             device=device
         )
         return block_mask
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Optimized Forward Pass with Contiguous Fix.
+        """
         B, L, D = x.shape
 
-
         qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
-
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -82,11 +84,11 @@ class LocalCausalFlexAttention(nn.Module):
         k = k.contiguous()
         v = v.contiguous()
 
-        # 2. RoPE
+        # RoPE
         if self.use_rope:
             q, k = self.rope(q, k, start_pos=0)
 
-        block_mask = self._get_block_mask(L, q.device)
+        block_mask = self._get_block_mask(L, L, q.device)
 
         attn_out = flex_attention(
             q, k, v,
@@ -96,6 +98,53 @@ class LocalCausalFlexAttention(nn.Module):
 
         attn_out = attn_out.transpose(1, 2).reshape(B, L, D)
         return self.out(attn_out)
+
+    def generate(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        # 1. Handle Cache Offset
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            pos_offset = k_cache.shape[2]
+        else:
+            pos_offset = 0
+            k_cache, v_cache = None, None
+
+        if self.use_rope:
+            q, k = self.rope(q, k, start_pos=pos_offset)
+
+        if k_cache is not None:
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+
+        self.kv_cache = (k, v)
+
+        Q_LEN = q.shape[2]
+        KV_LEN = k.shape[2]
+
+        block_mask = self._get_block_mask(Q_LEN, KV_LEN, q.device)
+
+        # 5. Flex Attention
+        attn_out = flex_attention(
+            q, k, v,
+            block_mask=block_mask,
+            scale=1.0 / (self.head_dim ** 0.5)
+        )
+
+        attn_out = attn_out.transpose(1, 2).reshape(B, L, D)
+        return self.out(attn_out)
+
+    def clear_cache(self):
+        """Clear the KV cache."""
+        self.kv_cache = None
 
 class HybridLocalAttn(Layer):
     __name__ = "HybridLocalAttn"
