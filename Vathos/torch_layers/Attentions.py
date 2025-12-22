@@ -6,15 +6,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from Vathos.blocks import *
-flag("This module is WIP, LocalCausalFlexAttention is broken") # TODO
+
+flag("This module is WIP, LocalCausalFlexAttention is broken")  # TODO
 try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+
     FLEX_ATTENTION_AVAILABLE = True
 except ImportError:
     flag("torch.nn.attention.flex_attention not found, consider, installing it")
     FLEX_ATTENTION_AVAILABLE = False
     flex_attention = None
     create_block_mask = None
+
+
+def local_causal_mod(q_idx, kv_idx, window_size):
+    """
+    The mask modality function.
+    Note: We pass window_size via partial or closure in the mask creation,
+    but keeping the logic pure helps the compiler.
+    """
+    return (kv_idx <= q_idx) & ((q_idx - kv_idx) < window_size)
 
 
 class LocalCausalFlexAttention(Layer):
@@ -40,110 +51,87 @@ class LocalCausalFlexAttention(Layer):
         self.window_size = window_size
         self.use_rope = rope
 
-        # Projections
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
 
-        # Components
         self.rope = RoPE(self.head_dim) if rope else None
         self.dropout = nn.Dropout(dropout)
 
-        # FlexAttention State
         self.use_flex_attention = FLEX_ATTENTION_AVAILABLE
-        self._cached_block_mask = None
-        self._cached_seq_len = 0
 
-        # Generation / Cache State
+        self._cached_block_mask = None
+        self._cached_seq_len = -1
+
         self.kv_cache = None
         self.decoding_pos = 0
-
-        # Debugging
         self.debug = False
 
     def has_custom_generate(self):
         return True
 
-    def _get_local_mask_mod(self):
-        """Defines the sliding window logic for FlexAttention compiler"""
-        w = self.window_size
+    def _get_block_mask(self, L, device):
+        if self._cached_block_mask is None or self._cached_seq_len != L:
+            if self.debug: print(f"[FlexAttn] Compiling mask for L={L}")
 
-        def local_causal(b, h, q_idx, kv_idx):
-            return (kv_idx <= q_idx) & ((q_idx - kv_idx) < w)
+            def bound_local_causal(b, h, q_idx, kv_idx):
+                return local_causal_mod(b, h, q_idx, kv_idx, self.window_size)
 
-        return local_causal
+            self._cached_block_mask = create_block_mask(
+                bound_local_causal,
+                B=None, H=None, Q_LEN=L, KV_LEN=L,
+                device=device
+            )
+            self._cached_seq_len = L
+
+        return self._cached_block_mask
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Standard Forward Pass (Training / Prefill).
-        Uses FlexAttention if available, otherwise SDPA with mask.
+        Standard Forward Pass.
         """
         B, L, D = x.shape
 
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).contiguous()
+
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_rope:
             q, k = self.rope(q, k, start_pos=0)
 
+        attn_out = self._apply_attention(q, k, v)
+
+        attn_out = attn_out.transpose(1, 2).reshape(B, L, D)
+        return self.out(attn_out)
+
+    def _apply_attention(self, q, k, v):
+        """
+        Internal attention router: Flex vs SDPA fallback
+        """
+        B, H, L, D = q.shape
+
         if self.use_flex_attention:
-            if self._cached_block_mask is None or self._cached_seq_len != L:
-                if self.debug: print(f"[FlexAttn] Compiling mask for L={L}")
-                self._cached_block_mask = create_block_mask(
-                    self._get_local_mask_mod(),
-                    B=None, H=None, Q_LEN=L, KV_LEN=L,
-                    device=q.device
-                )
-                self._cached_seq_len = L
+            block_mask = self._get_block_mask(L, q.device)
 
-            # Run Fused Kernel
-            attn_output = flex_attention(q, k, v, block_mask=self._cached_block_mask)
+            return flex_attention(q, k, v, block_mask=block_mask)
         else:
-            # Fallback (Dense Mask)
-            attn_output = self._fallback_attention(q, k, v)
-
-        # 4. Output
-        attn_output = attn_output.transpose(1, 2).reshape(B, L, D)
-        return self.out(self.dropout(attn_output))
+            return self._fallback_attention(q, k, v)
 
     def generate(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Generation Step. Handles Prefill (L>1) and Decode (L=1).
-        """
+
         B, L, D = x.shape
 
-        if L > 1:
-            if self.debug: print(f"[Gen] Prefill L={L}")
-
-            output = self.forward(x)
-
-            with torch.no_grad():
-                qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-                k = qkv[:, :, 1].transpose(1, 2)
-                v = qkv[:, :, 2].transpose(1, 2)
-
-                if self.use_rope:
-                    _, k = self.rope(k, k, start_pos=self.decoding_pos)
-
-                if self.kv_cache is not None:
-                    k_old, v_old = self.kv_cache
-                    k = torch.cat([k_old, k], dim=2)
-                    v = torch.cat([v_old, v], dim=2)
-
-                if k.size(2) > self.window_size:
-                    k = k[:, :, -self.window_size:, :]
-                    v = v[:, :, -self.window_size:, :]
-
-                self.kv_cache = (k, v)
-                self.decoding_pos += L
-
-            return output
-
+        # 1. Project QKV once
         qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, L, D)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
+        # 2. Apply RoPE
         if self.use_rope:
+            # Note: start_pos determines the rotation for the new tokens
             q, k = self.rope(q, k, start_pos=self.decoding_pos)
 
+        # 3. KV Cache Management
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
             k = torch.cat([k_cache, k], dim=2)
@@ -156,30 +144,42 @@ class LocalCausalFlexAttention(Layer):
         self.kv_cache = (k, v)
         self.decoding_pos += L
 
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=False,
-            dropout_p=0.0
-        )
-
-        if self.debug and self.decoding_pos % 100 == 0:
-            print(f"[Gen] Step {self.decoding_pos} | Cache Size: {k.size(2)}")
+        if L > 1:
+            if self.decoding_pos == L:  # Fresh prefill
+                attn_output = self._apply_attention(q, k, v)
+            else:
+                attn_output = self._fallback_attention(q, k, v)
+        else:
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v,
+                is_causal=False,
+                dropout_p=0.0
+            )
 
         attn_output = attn_output.transpose(1, 2).reshape(B, L, D)
         return self.out(attn_output)
 
     def _fallback_attention(self, q, k, v):
-        """Standard PyTorch SDPA with manually created local mask"""
-        L = q.size(2)
-        mask = torch.ones(L, L, device=q.device, dtype=torch.bool).tril()
-        local_mask = torch.ones(L, L, device=q.device, dtype=torch.bool).triu(-self.window_size + 1)
-        final_mask = mask & local_mask
+        """SDPA Fallback with memory-efficient mask creation"""
+        L_q = q.size(2)
+        L_kv = k.size(2)
 
-        return F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=final_mask,
-            dropout_p=self.dropout.p if self.training else 0.0
-        )
+        if L_q == 1:
+            return F.scaled_dot_product_attention(q, k, v, is_causal=False)
+
+        if L_q == L_kv:
+            idx_q = torch.arange(L_q, device=q.device).unsqueeze(1)
+            idx_k = torch.arange(L_kv, device=q.device).unsqueeze(0)
+
+            mask = (idx_k <= idx_q) & ((idx_q - idx_k) < self.window_size)
+
+            return F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=mask,
+                dropout_p=self.dropout.p if self.training else 0.0
+            )
+        else:
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
     def clear_cache(self):
         self.kv_cache = None
@@ -235,7 +235,6 @@ class HybridLocalAttn(Layer):
         self.attn.clear_cache()
         if hasattr(self.sec_mixer, 'clear_cache'):
             self.sec_mixer.clear_cache()
-
 
 
 if __name__ == '__main__':

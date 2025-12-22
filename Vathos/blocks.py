@@ -396,54 +396,105 @@ class MultiheadAttentionMixer(Layer):
         self.kv_cache = None
 
 
-class MultiheadLatentAttentionMixer(Layer):
+class MultiheadLatentAttentionMixer(nn.Module):  # Changed Layer to nn.Module for standard torch
     __name__ = "MultiheadLatentAttentionMixer"
+    # Adjusted complexity notation
     __complexity__ = "O(L^2 d + L d * d_kv_lora)"
 
-    def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False, droupout=0.1):
+    def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False, dropout=0.1):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.d_kv_lora = d_kv_lora
+        self.rope_enabled = rope
 
         self.q = nn.Linear(d_model, d_model, bias=False)
 
-        self.kv_compress = nn.Linear(d_model, d_kv_lora + d_model // n_heads, bias=False)
-
-        self.k_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
+        self.kv_compress = nn.Linear(d_model, d_kv_lora, bias=False)
+        self.k_content_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
         self.v_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
 
         self.out = nn.Linear(d_model, d_model, bias=False)
 
-        if rope:
+        if self.rope_enabled:
             self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
 
-        self.droupout = nn.Dropout(droupout)
+        self.dropout = nn.Dropout(dropout)
+
+        nn.init.zeros_(self.out.weight)
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
+        H = self.n_heads
+        HD = self.head_dim
 
-        q = self.q(x).reshape(B, L, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, L, d_h)
+        q = self.q(x).view(B, L, H, HD).transpose(1, 2)
 
-        kv_compressed = self.kv_compress(x)  # (B, L, d_kv_lora + d_h)
-        k_latent, v_pe = kv_compressed.split([self.d_kv_lora, self.head_dim], dim=-1)
+        c_kv = self.kv_compress(x)
+        k = self.k_content_decompress(c_kv).view(B, L, H, HD).transpose(1, 2)
+        v = self.v_decompress(c_kv).view(B, L, H, HD).transpose(1, 2)
+        if self.rope_enabled:
+            q, k = self.rope(q, k)
 
-        k = self.k_decompress(k_latent).reshape(B, L, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_decompress(k_latent).reshape(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=self.causal
+        )
 
-        if self.rope is not None:
-            q_rope = q + v_pe.unsqueeze(1)
-            k, q_rope = self.rope(q_rope, k)
-            q = q_rope
+        attn = attn.transpose(1, 2).contiguous().view(B, L, D)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
         return self.out(attn)
+
+
+class DecoupledSelfAttention(nn.Module):
+    __name__ = "DecoupledSelfAttention"
+    __complexity__ = "O(L^2 * d_qk + L * d_model * (d_qk + d_v))"
+
+    def __init__(self, d_model: int, n_heads: int, qk_dim: int, causal: bool, rope=False, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.qk_dim = qk_dim
+        self.v_dim = d_model // n_heads
+        self.causal = causal
+        self.rope_enabled = rope
+
+        self.qk_proj = nn.Linear(d_model, n_heads * 2 * qk_dim, bias=False)
+
+        self.v_proj = nn.Linear(d_model, n_heads * self.v_dim, bias=False)
+
+        self.out_proj = nn.Linear(n_heads * self.v_dim, d_model, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+        if self.rope_enabled:
+            self.rope = RoPE(qk_dim)
+
+        nn.init.zeros_(self.out_proj.weight)
+
+    def forward(self, x: torch.Tensor):
+        B, L, _ = x.shape
+        H = self.n_heads
+
+        q, k = self.q_proj(x).view(B, L, H, self.qk_dim).transpose(1, 2).chunk(2, -1)
+
+        v = self.v_proj(x).view(B, L, H, self.v_dim).transpose(1, 2)
+
+        if self.rope_enabled:
+            q, k = self.rope(q, k)
+
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=self.causal
+        )
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, H * self.v_dim)
+
+        return self.out_proj(attn_out)
 
 
 class CausalMultiheadAttentionMixer(Layer):
@@ -1173,20 +1224,26 @@ class SequenceModel(VathosModel):
             return self.simple_generate(*args, **kwargs)
 
     @torch.no_grad()
-    def simple_generate(self, prompt: torch.Tensor, max_len=100, temperature=1.0, top_p=1.0, top_k=50, token_end=None):
+    def simple_generate(self, prompt: torch.Tensor, max_len=100, temperature=1.0,
+                        top_p=1.0, top_k=50, token_end=None, repetition_penalty=1.0):
         self.eval()
         if prompt.dim() == 1:
             prompt = prompt.unsqueeze(0)
 
         generated = prompt.clone()
-
         pbar = tqdm(range(max_len), desc="Simple Gen")
+
         for _ in pbar:
             logits = self.forward(generated, unembed=True)
-
             next_token_logits = logits[:, -1, :]
-            next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
 
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                next_token_logits = self._apply_repetition_penalty(
+                    next_token_logits, generated, repetition_penalty
+                )
+
+            next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
             generated = torch.cat([generated, next_token], dim=1)
 
             if token_end is not None and (next_token == token_end).all():
@@ -1195,7 +1252,8 @@ class SequenceModel(VathosModel):
         return generated
 
     @torch.no_grad()
-    def custom_generate(self, prompt: torch.Tensor, max_len=100, temperature=1.0, top_p=1.0, top_k=50, token_end=None):
+    def custom_generate(self, prompt: torch.Tensor, max_len=100, temperature=1.0,
+                        top_p=1.0, top_k=50, token_end=None, repetition_penalty=1.0):
         self.eval()
         self._clear_all_caches()
 
@@ -1213,9 +1271,15 @@ class SequenceModel(VathosModel):
                 x = block(x)
 
         generated = prompt.clone()
-
         logits = self.unembedder(x)
         next_token_logits = logits[:, -1, :]
+
+        # Apply repetition penalty
+        if repetition_penalty != 1.0:
+            next_token_logits = self._apply_repetition_penalty(
+                next_token_logits, generated, repetition_penalty
+            )
+
         next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
         generated = torch.cat([generated, next_token], dim=1)
 
@@ -1237,8 +1301,13 @@ class SequenceModel(VathosModel):
             logits = self.unembedder(x_t)
             next_token_logits = logits[:, -1, :]
 
-            next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                next_token_logits = self._apply_repetition_penalty(
+                    next_token_logits, generated, repetition_penalty
+                )
 
+            next_token = self._sample_token(next_token_logits, temperature, top_p, top_k)
             generated = torch.cat([generated, next_token], dim=1)
 
             if token_end is not None and (next_token == token_end).all():
@@ -1247,11 +1316,44 @@ class SequenceModel(VathosModel):
         self._clear_all_caches()
         return generated
 
+    def _apply_repetition_penalty(self, logits: torch.Tensor,
+                                  generated: torch.Tensor,
+                                  repetition_penalty: float) -> torch.Tensor:
+        """
+        Apply repetition penalty to logits based on previously generated tokens.
+
+        Args:
+            logits: Shape (batch_size, vocab_size)
+            generated: Shape (batch_size, seq_len) - previously generated tokens
+            repetition_penalty: Penalty factor (> 1.0 discourages repetition)
+
+        Returns:
+            Modified logits with repetition penalty applied
+        """
+        batch_size = logits.shape[0]
+
+        for i in range(batch_size):
+            # Get unique tokens in the generated sequence for this batch item
+            unique_tokens = generated[i].unique()
+
+            # Apply penalty: divide logits by penalty if positive, multiply if negative
+            for token_id in unique_tokens:
+                if logits[i, token_id] > 0:
+                    logits[i, token_id] /= repetition_penalty
+                else:
+                    logits[i, token_id] *= repetition_penalty
+
+        return logits
+
     def summary(self):
         complexities = [self.channel_complexity, self.spatial_complextiy, self.embedder_complexity,
                         self.unembedder_complexity]
-        print(f'{NUM}VATHOS{RES} Model Summary:')
+        print(f'{NUM}VATHOS{RES} {self.name} Summary:')
         print(f"{NUM}SequenceModel{RES}(d_model={NUM}{self.d_model}{RES}, n_layer={NUM}{self.n_layers}{RES})")
+        print(f"\t - {NUM}VOCAB_SIZE:{RES}: {NUM}{self.vocab_size}{RES}")
+        print(f"\t - {NUM}D_MODEL:{RES}: {NUM}{self.d_model}{RES}")
+        print(f"\t - {NUM}N_LAYERS:{RES}: {NUM}{self.n_layers}{RES}")
+        print("")
         print(f"\t - {NUM}Embedder{RES}: {getname(self.embedder)} - {NUM}{self.embedder_complexity}{RES}")
         print(f"\t - {NUM}Unembedder{RES}: {getname(self.unembedder)} - {NUM}{self.unembedder_complexity}{RES}")
         print(
@@ -1444,7 +1546,7 @@ if __name__ == "__main__":
     model.summary()
     model.profile()
     model.autosave = False
-    model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=True)
+    model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=True, repetition_penalty=1.2)
     model.profile(avg=True, plot=True)
 
     model.save_checkpoint('caroler.pt')

@@ -428,6 +428,29 @@ class SwiGLU(Layer):
         return x * F.silu(gate)
 
 
+class ReLU2(Layer):
+    gated = True
+    __name__ = "ReLU^2"
+    __complexity__ = "O(L)"
+
+    def forward(self, x: torch.Tensor):
+        return torch.relu(x).square()
+
+
+class UDLPReLU2(Layer):
+    def __init__(self, d_model, expand, dropout=0.075):
+        super().__init__()
+        self.expand = nn.Linear(d_model, d_model * expand, bias=False)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+        nn.init.kaiming_normal_(self.expand.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        return self.dropout(self.contract(torch.relu(self.expand(x)).square()))
+
+
 class MLP(Layer):
     __name__ = "MLP"
     __complexity__ = "O(depth L d^2)"
@@ -536,7 +559,7 @@ class FlashSDLP(Layer):
         v = self.M2.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
         attn_output = F.scaled_dot_product_attention(
-            query=q*self.scaler,
+            query=q * self.scaler,
             key=k,
             value=v,
             dropout_p=self.dropout_p if self.training else 0.0,
@@ -545,18 +568,6 @@ class FlashSDLP(Layer):
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
 
         return self.out_proj(attn_output)
-
-
-class TiedDLPSoftmax(Layer):
-    def __init__(self, d_model, m, dropout=0.1):
-        super().__init__()
-        self.memory_bank = nn.Parameter(torch.randn(m, d_model))
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        logits = torch.matmul(x, self.memory_bank.t())
-        attn = self.dropout(logits.softmax(dim=-1))
-        return torch.matmul(attn, self.memory_bank)
 
 
 class DLPSwiGLU(Layer):
