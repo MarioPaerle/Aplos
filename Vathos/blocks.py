@@ -394,6 +394,78 @@ class MultiheadAttentionMixer(Layer):
         self.kv_cache = None
 
 
+class GroupedQueryAttention(nn.Module):
+    def __init__(
+            self,
+            embed_dim: int,
+            num_heads: int,
+            num_kv_heads: int,
+            dropout: float = 0.0,
+            bias: bool = True,
+    ):
+        super().__init__()
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = embed_dim // num_heads
+        self.dropout_prob = dropout
+
+        # Validation
+        if self.embed_dim % self.num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = nn.Linear(embed_dim, num_kv_heads * self.head_dim, bias=bias)
+        self.v_proj = nn.Linear(embed_dim, num_kv_heads * self.head_dim, bias=bias)
+
+        self.o_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.q_proj.weight)
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.o_proj.weight)
+        if self.q_proj.bias is not None:
+            nn.init.constant_(self.q_proj.bias, 0)
+            nn.init.constant_(self.k_proj.bias, 0)
+            nn.init.constant_(self.v_proj.bias, 0)
+            nn.init.constant_(self.o_proj.bias, 0)
+
+    def forward(
+            self,
+            x: torch.Tensor,
+            attn_mask: Optional[torch.Tensor] = None,
+            is_causal: bool = True
+    ) -> torch.Tensor:
+        B, T, C = x.shape
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+
+        k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout_prob if self.training else 0.0,
+            is_causal=is_causal,
+            enable_gqa=True
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
+
+        return self.o_proj(attn_output)
+
+
 class MultiheadLatentAttentionMixer(Layer):  # Changed Layer to nn.Module for standard torch
     __name__ = "MultiheadLatentAttentionMixer"
     # Adjusted complexity notation

@@ -28,7 +28,7 @@ class VathosConfig:
     """Global configuration state"""
     _COMPILABLE = False  # If True, bypasses all profiling for torch.compile compatibility
     _PROFILE_BATCHED = True
-    _GLOBAL_PROFILE = False
+    _GLOBAL_PROFILE = True
 
 
 def set_vathos_mode(mode: str):

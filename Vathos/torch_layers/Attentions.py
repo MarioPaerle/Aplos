@@ -21,6 +21,7 @@ except ImportError:
     flex_attention = None
     create_block_mask = None
 
+
 def _sliding_window_mask_logic(b, h, q_idx, kv_idx, window_size):
     """
     Pure logic for Sliding Window Attention.
@@ -145,6 +146,7 @@ class LocalCausalFlexAttention(Layer):
     def clear_cache(self):
         """Clear the KV cache."""
         self.kv_cache = None
+
 
 class HybridLocalAttn(Layer):
     __name__ = "HybridLocalAttn"
