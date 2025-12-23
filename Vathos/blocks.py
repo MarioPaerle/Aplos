@@ -397,72 +397,71 @@ class MultiheadAttentionMixer(Layer):
 class GroupedQueryAttention(nn.Module):
     def __init__(
             self,
-            embed_dim: int,
-            num_heads: int,
-            num_kv_heads: int,
+            d_model: int,
+            n_heads: int,
+            n_kv_heads: int,
             dropout: float = 0.0,
-            bias: bool = True,
+            bias: bool = False,
+            causal: bool = True
     ):
         super().__init__()
 
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = embed_dim // num_heads
+        self.d_model = d_model
+        self.num_heads = n_heads
+        self.num_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
         self.dropout_prob = dropout
+        self.causal = causal
 
-        # Validation
-        if self.embed_dim % self.num_heads != 0:
-            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        self.n_rep = self.num_heads // self.num_kv_heads
+
+        if self.d_model % self.num_heads != 0:
+            raise ValueError(f"embed_dim ({d_model}) must be divisible by num_heads ({n_heads})")
         if self.num_heads % self.num_kv_heads != 0:
-            raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
+            raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
 
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.k_proj = nn.Linear(embed_dim, num_kv_heads * self.head_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, num_kv_heads * self.head_dim, bias=bias)
-
-        self.o_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
+        # Fused KV projection: projects to [n_kv_heads * 2 * head_dim]
+        self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
+        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
 
         self._reset_parameters()
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.k_proj.weight)
-        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.kv_proj.weight)
         nn.init.xavier_uniform_(self.o_proj.weight)
         if self.q_proj.bias is not None:
             nn.init.constant_(self.q_proj.bias, 0)
-            nn.init.constant_(self.k_proj.bias, 0)
-            nn.init.constant_(self.v_proj.bias, 0)
+            nn.init.constant_(self.kv_proj.bias, 0)
             nn.init.constant_(self.o_proj.bias, 0)
 
-    def forward(
-            self,
-            x: torch.Tensor,
-            attn_mask: Optional[torch.Tensor] = None,
-            is_causal: bool = True
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
 
         q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        kv = self.kv_proj(x)
 
         q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        kv = kv.view(B, T, self.num_kv_heads, 2, self.head_dim)
+        k, v = kv.unbind(dim=3)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.n_rep > 1:
+            k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
+            v = v[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
+            k = k.reshape(B, self.num_heads, T, self.head_dim)
+            v = v.reshape(B, self.num_heads, T, self.head_dim)
 
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask,
             dropout_p=self.dropout_prob if self.training else 0.0,
-            is_causal=is_causal,
-            enable_gqa=True
+            is_causal=self.causal
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-
         return self.o_proj(attn_output)
 
 
