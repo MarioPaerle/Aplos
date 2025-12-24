@@ -474,6 +474,7 @@ class DLPSoftmax(Layer):
     def __init__(self, d_model, m, dropout=0.1, copy=False):
         super().__init__()
         self.expand = nn.Linear(d_model, m, bias=False)
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.contract = nn.Linear(m, d_model, bias=False)
         self.scaler = nn.Parameter(torch.tensor([1.0]))
 
@@ -484,7 +485,8 @@ class DLPSoftmax(Layer):
                 self.contract.weight.copy_(self.expand.weight.t())
 
     def forward(self, x):
-        logits = self.expand(x) * self.scaler
+        q = self.q_proj(x)
+        logits = self.expand(q) * self.scaler
 
         attn_weights = logits.softmax(dim=-1)
         attn_weights = self.dropout(attn_weights)
