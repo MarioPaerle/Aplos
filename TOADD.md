@@ -2,7 +2,7 @@
 - Need to implement a way to make additional losses, like vq losses travel easily across Layers
 - EMA weight training
 - Multi Latent Attention check
-- Finetuning Techniques
+- Finetuning-Ready Blocks
 - Easier Hybrid Models
 - MoE MLPs
 

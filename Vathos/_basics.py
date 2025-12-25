@@ -12,6 +12,7 @@ from Vathos.functions import *
 from timeit import default_timer as timer
 from collections import OrderedDict, defaultdict
 import re
+import math
 
 ACTIVS = {
     'tanh': nn.Tanh,
@@ -476,7 +477,8 @@ class DLPSoftmax(Layer):
         self.expand = nn.Linear(d_model, m, bias=False)
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.contract = nn.Linear(m, d_model, bias=False)
-        self.scaler = nn.Parameter(torch.tensor([1.0]))
+
+        self.scaler = nn.Parameter(torch.tensor([1/math.sqrt(d_model)]))
 
         self.dropout = nn.Dropout(dropout)
 
@@ -486,7 +488,7 @@ class DLPSoftmax(Layer):
 
     def forward(self, x):
         q = self.q_proj(x)
-        logits = self.expand(q) * self.scaler
+        logits = self.expand(q * self.scaler)
 
         attn_weights = logits.softmax(dim=-1)
         attn_weights = self.dropout(attn_weights)
@@ -553,6 +555,7 @@ class DLPSwiGLU(Layer):
 
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))
+
 
 class UDLPSwiGLU(Layer):
     def __init__(self, d_model, expand, dropout=0.05):
