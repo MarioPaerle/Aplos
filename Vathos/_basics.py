@@ -14,6 +14,7 @@ from collections import OrderedDict, defaultdict
 import re
 import math
 
+
 ACTIVS = {
     'tanh': nn.Tanh,
     'sigmoid': nn.Sigmoid,
@@ -378,6 +379,21 @@ class Linear(Layer):
         return self.linear(x)
 
 
+class LowRankLinear(Layer):
+    __name__ = 'Linear'
+
+    def __init__(self, input_dim, output_dim, rank=16, bias=False):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.bias = bias
+        self.l1 = nn.Linear(input_dim, rank, bias=bias)
+        self.l2 = nn.Linear(rank, output_dim, bias=bias)
+
+    def forward(self, x):
+        return self.l2(self.l1(x))
+
+
 class UnbiasedLinear(Layer):
     __name__ = "UnbiasedLinear"
     __complexity__ = "O(L d^2)"
@@ -567,6 +583,35 @@ class UDLPSwiGLU(Layer):
 
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class F_UDLPSwiGLU(Layer):
+    def __init__(self, d_model, expand, dropout=0.05, lora_rank=16):
+        super().__init__()
+        self.expand = nn.Linear(d_model, d_model * expand * 2, bias=False)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=False)
+        self.LoRA_expand = LowRankLinear(d_model, d_model * 2, lora_rank)
+        self.LoRA_contract = LowRankLinear(d_model, d_model, lora_rank)
+        self.scale = lora_rank*2
+        self.finetuning = False
+        self.activation = SwiGLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        if not self.finetuning:
+            return self.dropout(self.contract(self.activation(self.expand(x))))
+        else:
+            act = self.activation(self.expand(x) + self.LoRA_expand(x)*self.scale)
+            return self.dropout(
+                self.contract(act) + self.LoRA_contract(act)*self.scale
+            )
+
+    def active_finetune(self):
+        torch.init.zeros_(self.LORA_expand.weight)
+        torch.init.zeros_(self.LoRA_contract.weight)
+        self.expand.requires_grad_(False)
+        self.contract.requires_grad_(False)
+        self.finetuning = True
 
 
 class ResMLPBlock(Layer):

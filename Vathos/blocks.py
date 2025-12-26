@@ -881,6 +881,18 @@ class ClsHead(Layer):
         return self.proj(x)[:, 0, :]
 
 
+class MultiHeadUnembedder(Layer):
+    __name__ = "UnbiasedLinear"
+    __complexity__ = "O(L d^2)"
+
+    def __init__(self, d_model, vocab_size, k=4):
+        super(MultiHeadUnembedder, self).__init__()
+        self.linear = nn.Linear(d_model, vocab_size*k, bias=False)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
 class VathosModel(Layer):
     __name__ = "VathosModel"
 
@@ -1096,6 +1108,7 @@ class SequenceModel(VathosModel):
                  embedder=Embedder,
                  embedder_args: dict = None,
                  unembedder=UnbiasedLinear,
+                 unembedder_args=None,
                  channel_mixer=MLP,
                  spatial_mixer: Layer | nn.Module = MultiheadAttentionMixer,
                  channel_args: dict = None,
@@ -1123,6 +1136,8 @@ class SequenceModel(VathosModel):
             channel_args = {}
         if embedder_args is None:
             embedder_args = {}
+        if unembedder_args is None:
+            unembedder_args = {'input_features': d_model, 'output_features': vocab_size}
         if baseblock_args is None:
             baseblock_args = {}
 
@@ -1158,7 +1173,7 @@ class SequenceModel(VathosModel):
         self._piped_blocks = None
 
         self.norm = nn.LayerNorm(d_model)
-        self.unembedder = unembedder(d_model, vocab_size)
+        self.unembedder = unembedder(**unembedder_args)
 
         if weight_tying and isinstance(self.embedder, EasyEmbedder) and isinstance(self.unembedder, UnbiasedLinear):
             self.unembedder.linear.weight = self.embedder.embedding.weight
@@ -1606,7 +1621,8 @@ if __name__ == "__main__":
         max_len=2116,
         pos_encoder=True,
         embedder=EasyEmbedder,
-        unembedder=UnbiasedLinear,
+        unembedder=MultiHeadUnembedder,
+        unembedder_args={'d_model': 128, 'vocab_size': 100, 'k': 4},
         channel_mixer=DLPSwiGLU,
         channel_args={'expand': 2},
         rope=True,
@@ -1614,8 +1630,10 @@ if __name__ == "__main__":
         spatial_args={'n_heads': 8, 'causal': True}
     )
     # set_vathos_mode("debug")
-    model = torch.compile(model)
+    # model = torch.compile(model)
     out = model(x).detach()
+    print(out.shape)
+    exit()
     model.summary()
     model.profile()
     model.autosave = False
