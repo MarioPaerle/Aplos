@@ -674,9 +674,10 @@ class Embedder(Layer):
             flag("Trying to unfreeze an already unfrozen Embedder")
 
     def forward(self, x):
-        assert x.dtype == torch.long and x.min() >= 0 and x.max() <= self.vocab_size, ("either dtype is not long, or x "
-                                                                                       "is not in [0, vocab_size]")
         return self.embedding(x)
+
+    def finetune(self):
+        self.freeze()
 
 
 class EasyEmbedder(Layer):
@@ -887,7 +888,7 @@ class MultiHeadUnembedder(Layer):
 
     def __init__(self, d_model, vocab_size, k=4):
         super(MultiHeadUnembedder, self).__init__()
-        self.linear = nn.Linear(d_model, vocab_size*k, bias=False)
+        self.linear = nn.Linear(d_model, vocab_size * k, bias=False)
 
     def forward(self, x):
         return self.linear(x)
@@ -915,6 +916,7 @@ class VathosModel(Layer):
         self.steps = 0
         self.steps_per_epoch = 0
         self.epochs = 0
+        self.finetuning = False
 
     def flag_not_training(self):
         if not self.training:
@@ -1093,6 +1095,17 @@ class VathosModel(Layer):
         self.autosave = checkpoint['autosave']
         self.autosave_overwrite = checkpoint['autosave_overwrite']
 
+    def finetune(self):
+        self.finetuning = True
+
+    def train(self, *args, **kwargs):
+        self.finetuning = False
+        super().train(*args, **kwargs)
+
+    def eval(self):
+        self.finetuning = False
+        super().eval()
+
 
 ########################################################################################################################
 #   Assemblers
@@ -1180,7 +1193,7 @@ class SequenceModel(VathosModel):
 
         elif weight_tying:
             raise TypeError(
-                "Automatic weight tying is only possible if the embedder is an EasyEmbedder and Unembedder is an UnbiasedLinear."
+                "Automatic weight tying is only possible if the embedder is an Embedder or EasyEmbedder and Unembedder is an UnbiasedLinear."
                 " You shoul manually do weight tying if you aim to use specific layer:"
                 "\n e.g. model.unembedder.linear.weight = model.embedder.embeddings.weight is the auto weight tying.")
 
@@ -1450,6 +1463,19 @@ class SequenceModel(VathosModel):
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
         print(f"Total Complexity: {NUM}{combine_big_o_sum(complexities)}{RES}")
+
+    def finetune(self):
+        flag("Finetune simply checks for finetune() methods in spatial mixers, channel mixers, embedder and unembedder, "
+             "if a finetune method is not available, the module/Layer will be left as it is")
+        super().finetune()
+
+        if hasattr(self.embedder, "finetune"):
+            self.embedder.finetune()
+        if hasattr(self.unembedder, "finetune"):
+            self.unembedder.finetune()
+        for block in self.blocks:
+            if hasattr(block, "finetune"):
+                block.finetune()
 
 
 #######################################################################################################################

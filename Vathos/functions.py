@@ -112,7 +112,6 @@ def stable_power_weighted_cumsum(x: torch.Tensor, a: float = 0.999, rescale: boo
 
     alpha_pow = torch.pow(a_tensor, t)
 
-
     reshape_dims = [1, L] + [1] * (len(x.shape) - 2)
     alpha_pow = alpha_pow.view(*reshape_dims)
 
@@ -126,6 +125,7 @@ def stable_power_weighted_cumsum(x: torch.Tensor, a: float = 0.999, rescale: boo
         s = s * (1.0 - a_tensor)
 
     return s.to(dtype)
+
 
 def precompute_power_weigthed_cumsum(x, alpha_pow):
     return torch.cumsum(x / alpha_pow, dim=1) * alpha_pow
