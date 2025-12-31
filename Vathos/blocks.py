@@ -393,6 +393,91 @@ class MultiheadAttentionMixer(Layer):
     def clear_cache(self):
         self.kv_cache = None
 
+    def finetune(self):
+        self.qkv.weight.data.requires_grad = False
+        self.out.weight.data.requires_grad = False
+
+
+class MultiheadAttentionMixerNOV(Layer):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d +  L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
+        super().__init__()
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.kv_cache = None
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qk = self.qkv(x).reshape(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.permute(2, 0, 3, 1, 4)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=0)
+
+        attn = F.scaled_dot_product_attention(q, k, x, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def generate(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qk = self.qkv(x).reshape(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.permute(2, 0, 3, 1, 4)
+
+        # 1. Handle Cache Offset
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            pos_offset = k_cache.shape[2]
+        else:
+            pos_offset = 0
+            k_cache, v_cache = None, None
+
+        # 2. Apply RoPE (Rotates the *new* q and k relative to history)
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=pos_offset)
+
+        # 3. Update Cache
+        if k_cache is not None:
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, x], dim=2)
+
+        # Save updated cache
+        self.kv_cache = (k, x)
+
+        # 4. Attention with Dynamic Masking
+        # If L > 1, we are processing a prompt (Prefill), so we MUST be causal.
+        # If L == 1, we are generating a token step-by-step, attending to the whole history.
+        use_causal = self.causal and (L > 1)
+
+        attn = F.scaled_dot_product_attention(q, k, x, is_causal=use_causal)
+
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+    def finetune(self):
+        self.qk.weight.data.requires_grad = False
+        self.out.weight.data.requires_grad = False
+
 
 class GroupedQueryAttention(nn.Module):
     def __init__(
@@ -1465,8 +1550,9 @@ class SequenceModel(VathosModel):
         print(f"Total Complexity: {NUM}{combine_big_o_sum(complexities)}{RES}")
 
     def finetune(self):
-        flag("Finetune simply checks for finetune() methods in spatial mixers, channel mixers, embedder and unembedder, "
-             "if a finetune method is not available, the module/Layer will be left as it is")
+        flag(
+            "Finetune simply checks for finetune() methods in spatial mixers, channel mixers, embedder and unembedder, "
+            "if a finetune method is not available, the module/Layer will be left as it is")
         super().finetune()
 
         if hasattr(self.embedder, "finetune"):
