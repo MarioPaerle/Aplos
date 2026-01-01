@@ -590,9 +590,9 @@ class F_UDLPSwiGLU(Layer):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand * 2, bias=False)
         self.contract = nn.Linear(d_model * expand, d_model, bias=False)
-        self.LoRA_expand = LowRankLinear(d_model, d_model * 2, lora_rank)
-        self.LoRA_contract = LowRankLinear(d_model, d_model, lora_rank)
-        self.scale = lora_rank*2
+        self.LoRA_expand = LowRankLinear(d_model, expand * d_model * 2, lora_rank)
+        self.LoRA_contract = LowRankLinear(d_model * expand, d_model, lora_rank)
+        self.scale = 1/lora_rank*2
         self.finetuning = False
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
@@ -606,9 +606,9 @@ class F_UDLPSwiGLU(Layer):
                 self.contract(act) + self.LoRA_contract(act)*self.scale
             )
 
-    def active_finetune(self):
-        torch.init.zeros_(self.LORA_expand.weight)
-        torch.init.zeros_(self.LoRA_contract.weight)
+    def finetune(self):
+        torch.nn.init.zeros_(self.LORA_expand.l2.weight)
+        torch.nn.init.zeros_(self.LoRA_contract.l2.weight)
         self.expand.requires_grad_(False)
         self.contract.requires_grad_(False)
         self.finetuning = True

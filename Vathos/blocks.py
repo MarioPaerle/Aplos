@@ -409,7 +409,7 @@ class MultiheadAttentionMixerNOV(Layer):
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
 
-        self.qkv = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.qk = nn.Linear(d_model, 2 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
         if rope:
             self.rope = RoPE(self.head_dim)
@@ -423,13 +423,14 @@ class MultiheadAttentionMixerNOV(Layer):
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
 
-        qk = self.qkv(x).reshape(B, L, 2, self.n_heads, self.head_dim)
+        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
         q, k = qk.permute(2, 0, 3, 1, 4)
+        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
 
         if self.rope is not None:
             q, k = self.rope(q, k, start_pos=0)
 
-        attn = F.scaled_dot_product_attention(q, k, x, is_causal=self.causal)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
         attn = self.dropout(attn)
         return self.out(attn)
@@ -437,10 +438,11 @@ class MultiheadAttentionMixerNOV(Layer):
     def generate(self, x: torch.Tensor):
         B, L, D = x.shape
 
-        qk = self.qkv(x).reshape(B, L, 2, self.n_heads, self.head_dim)
+        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
         q, k = qk.permute(2, 0, 3, 1, 4)
+        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
 
-        # 1. Handle Cache Offset
+
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
             pos_offset = k_cache.shape[2]
@@ -448,24 +450,17 @@ class MultiheadAttentionMixerNOV(Layer):
             pos_offset = 0
             k_cache, v_cache = None, None
 
-        # 2. Apply RoPE (Rotates the *new* q and k relative to history)
         if self.rope is not None:
             q, k = self.rope(q, k, start_pos=pos_offset)
 
-        # 3. Update Cache
         if k_cache is not None:
             k = torch.cat([k_cache, k], dim=2)
-            v = torch.cat([v_cache, x], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
 
-        # Save updated cache
-        self.kv_cache = (k, x)
-
-        # 4. Attention with Dynamic Masking
-        # If L > 1, we are processing a prompt (Prefill), so we MUST be causal.
-        # If L == 1, we are generating a token step-by-step, attending to the whole history.
+        self.kv_cache = (k, v)
         use_causal = self.causal and (L > 1)
 
-        attn = F.scaled_dot_product_attention(q, k, x, is_causal=use_causal)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
 
         attn = attn.transpose(1, 2).reshape(B, L, D)
         attn = self.dropout(attn)
@@ -479,7 +474,7 @@ class MultiheadAttentionMixerNOV(Layer):
         self.out.weight.data.requires_grad = False
 
 
-class GroupedQueryAttention(nn.Module):
+class GroupedQueryAttention(Layer):
     def __init__(
             self,
             d_model: int,
@@ -506,7 +501,7 @@ class GroupedQueryAttention(nn.Module):
             raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
 
         self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-        # Fused KV projection: projects to [n_kv_heads * 2 * head_dim]
+
         self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
 
@@ -1561,7 +1556,8 @@ class SequenceModel(VathosModel):
             self.unembedder.finetune()
         for block in self.blocks:
             if hasattr(block, "finetune"):
-                block.finetune()
+                block.channel_mixer.finetune()
+                block.spatial_mixer.finetune()
 
 
 #######################################################################################################################
