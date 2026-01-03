@@ -56,7 +56,6 @@ def set_vathos_mode(mode: str):
 # =============================================================================
 
 class Layer(nn.Module):
-    # Marker to identify Vathos layers without circular imports
     _is_vathos_layer = True
 
     def __init__(self):
@@ -64,7 +63,6 @@ class Layer(nn.Module):
         self.complexity = "O(1)"
         self.__name__ = self.__class__.__name__
 
-        # Profiling State
         self._timer_unbatched = not VathosConfig._PROFILE_BATCHED
         self._tstart = 0
         self._tend = 0

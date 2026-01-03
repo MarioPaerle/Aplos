@@ -1213,11 +1213,12 @@ class SequenceModel(VathosModel):
                  baseblock_args=None,
                  dropout=0.1,
                  weight_tying=False,
-                 norm=nn.LayerNorm
+                 norm=nn.LayerNorm,
+                 d_modifiers: List | None = None
                  ):
         super().__init__()
         self.pad = pad
-        if rope and spatial_mixer is not MultiheadAttentionMixer:
+        if rope and spatial_mixer not in (MultiheadAttentionMixer, MultiheadAttentionMixerNOV, CausalMultiheadAttentionMixer, GroupedQueryAttention):
             flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
@@ -1233,6 +1234,8 @@ class SequenceModel(VathosModel):
             unembedder_args = {'input_features': d_model, 'output_features': vocab_size}
         if baseblock_args is None:
             baseblock_args = {}
+        if d_modifiers is None:
+            d_modifiers = [1 for _ in range(d_model)]
 
         self.pipe = {}
         self.name = name
@@ -1255,27 +1258,27 @@ class SequenceModel(VathosModel):
 
         self.blocks = nn.ModuleList([
             self.baseblock(
-                d_model=d_model,
-                channel_mixer=channel_mixer(d_model=d_model, **channel_args),
-                spatial_mixer=spatial_mixer(d_model=d_model, **spatial_args),
+                d_model=int(d_model * d_modifiers[i]),
+                channel_mixer=channel_mixer(d_model=int(d_model * d_modifiers[i]), **channel_args),
+                spatial_mixer=spatial_mixer(d_model=int(d_model * d_modifiers[i]), **spatial_args),
                 norm=norm,
                 **baseblock_args
             )
-            for _ in range(n_layers)
+            for i in range(n_layers)
         ])
         self._piped_blocks = None
 
         self.norm = nn.LayerNorm(d_model)
         self.unembedder = unembedder(**unembedder_args)
 
-        if weight_tying and isinstance(self.embedder, EasyEmbedder) and isinstance(self.unembedder, UnbiasedLinear):
+        if weight_tying and hasattr(self.embedder, 'embedding') and hasattr(self.unembedder, 'linear'):
             self.unembedder.linear.weight = self.embedder.embedding.weight
 
         elif weight_tying:
             raise TypeError(
-                "Automatic weight tying is only possible if the embedder is an Embedder or EasyEmbedder and Unembedder is an UnbiasedLinear."
-                " You shoul manually do weight tying if you aim to use specific layer:"
-                "\n e.g. model.unembedder.linear.weight = model.embedder.embeddings.weight is the auto weight tying.")
+                "Automatic weight tying is only possible if the the Embedder has a 'embedding' attribute and Unembedder has a linear attribute"
+                "You should manually do weight tying if you aim to use specific layer:"
+                "\n e.g. model.unembedder.yourmodule.weight = model.embedder.youembeddings.weight is an auto weight tying example")
 
         self.embedder_complexity = embedder.__complexity__ if hasattr(embedder, "__complexity__") else "O(L d)"
         self.unembedder_complexity = unembedder.__complexity__ if hasattr(unembedder, "__complexity__") else "O(L d)"
@@ -1731,10 +1734,10 @@ if __name__ == "__main__":
         embedder=EasyEmbedder,
         unembedder=MultiHeadUnembedder,
         unembedder_args={'d_model': 128, 'vocab_size': 100, 'k': 4},
-        channel_mixer=DLPSwiGLU,
+        channel_mixer=F_UDLPSwiGLU,
         channel_args={'expand': 2},
         rope=True,
-        spatial_mixer=MultiheadAttentionMixer,
+        spatial_mixer=MultiheadAttentionMixerNOV,
         spatial_args={'n_heads': 8, 'causal': True}
     )
     # set_vathos_mode("debug")
