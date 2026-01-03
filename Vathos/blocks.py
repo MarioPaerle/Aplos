@@ -560,7 +560,7 @@ class FFFMultiheadAttentionMixer(Layer):
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
 
-        self.q = LowRankLinear(d_model, d_model, rank=math.sqrt(d_model), bias=False)
+        self.q = LowRankLinear(d_model, d_model, rank=math.isqrt(d_model), bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
         if rope:
             self.rope = RoPE(self.head_dim)
@@ -847,6 +847,52 @@ class MultiheadDecoupledAttention(Layer):
         q, k = self.qk_proj(x).view(B, L, H, 2 * self.qk_dim).transpose(1, 2).chunk(2, -1)
 
         v = self.v_proj(x).view(B, L, H, self.v_dim).transpose(1, 2)
+
+        if self.rope_enabled:
+            q, k = self.rope(q, k)
+
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=self.causal
+        )
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, H * self.v_dim)
+
+        return self.out_proj(attn_out)
+
+
+class MultiheadDecoupledAttentionNOV(Layer):
+    __name__ = "DecoupledSelfAttention"
+    __complexity__ = "O(L^2 * d_qk + L * d_model * (d_qk + d_v))"
+
+    def __init__(self, d_model: int, n_heads: int, qk_dim: int, causal: bool, rope=False, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.qk_dim = qk_dim
+        self.v_dim = d_model // n_heads
+        self.causal = causal
+        self.rope_enabled = rope
+
+        self.qk_proj = nn.Linear(d_model, n_heads * 2 * qk_dim, bias=False)
+
+        self.out_proj = nn.Linear(n_heads * self.v_dim, d_model, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+        if self.rope_enabled:
+            self.rope = RoPE(qk_dim)
+
+        nn.init.zeros_(self.out_proj.weight)
+
+    def forward(self, x: torch.Tensor):
+        B, L, _ = x.shape
+        H = self.n_heads
+
+        q, k = self.qk_proj(x).view(B, L, H, 2 * self.qk_dim).transpose(1, 2).chunk(2, -1)
+
+        v = x.view(B, L, H, self.v_dim).transpose(1, 2)
 
         if self.rope_enabled:
             q, k = self.rope(q, k)
