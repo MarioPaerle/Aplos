@@ -442,6 +442,157 @@ class MultiheadAttentionMixerNOV(Layer):
         q, k = qk.permute(2, 0, 3, 1, 4)
         v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
 
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            pos_offset = k_cache.shape[2]
+        else:
+            pos_offset = 0
+            k_cache, v_cache = None, None
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=pos_offset)
+
+        if k_cache is not None:
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+
+        self.kv_cache = (k, v)
+        use_causal = self.causal and (L > 1)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
+
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+    def finetune(self):
+        self.qk.weight.data.requires_grad = False
+        self.out.weight.data.requires_grad = False
+
+
+class FFMultiheadAttentionMixerNOV(Layer):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d +  L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
+        super().__init__()
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.q = nn.Linear(d_model, d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.kv_cache = None
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        q = self.q(x).reshape(B, L, self.n_heads, self.head_dim)
+        q = q.permute(0, 2, 1, 3)
+        k = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=0)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def generate(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.permute(2, 0, 3, 1, 4)
+        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            pos_offset = k_cache.shape[2]
+        else:
+            pos_offset = 0
+            k_cache, v_cache = None, None
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=pos_offset)
+
+        if k_cache is not None:
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+
+        self.kv_cache = (k, v)
+        use_causal = self.causal and (L > 1)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
+
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+    def finetune(self):
+        self.qk.weight.data.requires_grad = False
+        self.out.weight.data.requires_grad = False
+
+
+class FFFMultiheadAttentionMixer(Layer):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d +  L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
+        super().__init__()
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.q = LowRankLinear(d_model, d_model, rank=math.sqrt(d_model), bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        if rope:
+            self.rope = RoPE(self.head_dim)
+        else:
+            self.rope = None
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.kv_cache = None
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        q = self.q(x).reshape(B, L, self.n_heads, self.head_dim)
+        q = q.permute(0, 2, 1, 3)
+        k = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, start_pos=0)
+
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = attn.transpose(1, 2).reshape(B, L, D)
+        attn = self.dropout(attn)
+        return self.out(attn)
+
+    def generate(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.permute(2, 0, 3, 1, 4)
+        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
 
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
@@ -1283,7 +1434,8 @@ class SequenceModel(VathosModel):
                  ):
         super().__init__()
         self.pad = pad
-        if rope and spatial_mixer not in (MultiheadAttentionMixer, MultiheadAttentionMixerNOV, CausalMultiheadAttentionMixer, GroupedQueryAttention):
+        if rope and spatial_mixer not in (
+        MultiheadAttentionMixer, MultiheadAttentionMixerNOV, CausalMultiheadAttentionMixer, GroupedQueryAttention):
             flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
