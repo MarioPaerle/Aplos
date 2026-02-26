@@ -43,6 +43,34 @@ class Block1d(Layer):
         return x
 
 
+class JBlock1d(Layer):
+    def __init__(self, d_model, channel_mixer: nn.Module, spatial_mixer: nn.Module, norm=nn.LayerNorm):
+        super().__init__()
+        self.spatial_mixer = spatial_mixer
+        self.channel_mixer = channel_mixer
+
+        self.norm = norm(d_model)
+
+    def forward(self, x: torch.Tensor):
+        h = self.norm(x)
+        return x + self.spatial_mixer(h) + self.channel_mixer(h)
+
+    def generate(self, x: torch.Tensor):
+        h = self.norm(x)
+
+        if hasattr(self.spatial_mixer, 'has_custom_generate') and self.spatial_mixer.has_custom_generate():
+            spatial_out = self.spatial_mixer.generate(h)
+        else:
+            spatial_out = self.spatial_mixer(h)
+
+        if hasattr(self.channel_mixer, 'has_custom_generate') and self.channel_mixer.has_custom_generate():
+            channel_out = self.channel_mixer.generate(h)
+        else:
+            channel_out = self.channel_mixer(h)
+
+        return x + spatial_out + channel_out
+
+
 class ExpandingBlock1d(Layer):
     def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, expand=1):
         super().__init__()
@@ -1558,6 +1586,8 @@ class SequenceModel(VathosModel):
             baseblock_args = {}
         if d_modifiers is None:
             d_modifiers = [1 for _ in range(d_model)]
+        else:
+            print(f"{NUM} Initialized SequenceModel with d_model structure: {[int(d_model * d) for d in d_modifiers]}{RES}")
 
         self.pipe = {}
         self.name = name
