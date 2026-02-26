@@ -1310,7 +1310,6 @@ class VathosModel(Layer):
     def __init__(self):
         super().__init__()
 
-        # LOSSES and METRICS
         self._losses = []
         self._losses_dict = {}
         self._losses_per_epoch = []
@@ -1320,7 +1319,7 @@ class VathosModel(Layer):
         self._metrics_this_epoch = dict()
         self._metrics_per_epoch = dict()
         self.autosave = True
-        self.autosave_overwrite = 0
+        self.autosave_overwrite = True
         self.best_loss = float('inf')
         self.checkpoints = 0
         self.steps = 0
@@ -1399,24 +1398,19 @@ class VathosModel(Layer):
         plt.show()
 
     def plot_metrics(self, figsize=(12, 8)):
-        """Plot all losses and metrics in subplots"""
-        # Count how many plots we need: 1 for losses + number of metrics
         n_metrics = len(self._metrics_per_epoch)
         n_plots = 1 + n_metrics
 
-        # Calculate grid dimensions
         n_cols = 2
-        n_rows = (n_plots + 1) // 2  # Ceiling division
+        n_rows = (n_plots + 1) // 2
 
         fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
 
-        # Flatten axes array for easier indexing
         if n_plots == 1:
             axes = np.array([axes])
         else:
             axes = axes.flatten()
 
-        # Plot losses in first subplot
         ax = axes[0]
         ax.plot(
             list(self._losses_dict.keys()),
@@ -1432,18 +1426,14 @@ class VathosModel(Layer):
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-        # Plot each metric in subsequent subplots
         for idx, (metric_name, metric_values) in enumerate(self._metrics_per_epoch.items(), start=1):
             ax = axes[idx]
 
-            # Plot per-step values if available
             if metric_name in self._metrics and len(self._metrics[metric_name]) > 0:
-                # Create step indices for metrics (assuming they align with training steps)
                 step_indices = list(range(len(self._metrics[metric_name])))
                 ax.plot(step_indices, self._metrics[metric_name],
                         label=f"{metric_name}", linewidth=1, alpha=0.6)
 
-            # Plot per-epoch values
             epoch_indices = list(range(len(metric_values)))
             ax.plot(epoch_indices, metric_values,
                     label=f"{metric_name} Per Epoch", linewidth=2, marker='o')
