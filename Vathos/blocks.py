@@ -46,8 +46,8 @@ class Block1d(Layer):
 class JBlock1d(Layer):
     def __init__(self, d_model, channel_mixer: nn.Module, spatial_mixer: nn.Module, norm=nn.LayerNorm):
         super().__init__()
-        self.spatial_mixer = spatial_mixer
         self.channel_mixer = channel_mixer
+        self.spatial_mixer = spatial_mixer
 
         self.norm = norm(d_model)
 
@@ -69,6 +69,7 @@ class JBlock1d(Layer):
             channel_out = self.channel_mixer(h)
 
         return x + spatial_out + channel_out
+
 
 
 class ExpandingBlock1d(Layer):
@@ -376,7 +377,7 @@ class MultiheadAttentionMixer(Layer):
         if self.rope is not None:
             q, k = self.rope(q, k, start_pos=0)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal, dropout_p=0)
         attn = attn.transpose(1, 2).reshape(B, L, D)
         attn = self.dropout(attn)
         return self.out(attn)

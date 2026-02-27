@@ -571,6 +571,23 @@ class DLPSwiGLU(Layer):
         return self.dropout(self.contract(self.activation(self.expand(x))))
 
 
+class LowRankGatedDLP(Layer):
+    def __init__(self, d_model, expand, dropout=0.05, activation=nn.SiLU, rank=64, gate_activation=None):
+        super().__init__()
+        self.ga = gate_activation if gate_activation is not None else Identity()
+        self.act = activation()
+        self.M = d_model * expand
+        self.rank = rank
+        self.expand = nn.Linear(d_model, d_model * expand + rank, bias=False)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=False)
+        self.rexp = nn.Linear(rank, d_model * expand, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out1, gate1 = self.expand(x).split([self.M, self.rank], dim=-1)
+        return self.contract(self.act(out1 * self.ga(self.rexp(gate1))))
+
+
 class UDLPSwiGLU(Layer):
     def __init__(self, d_model, expand, dropout=0.05):
         super().__init__()
