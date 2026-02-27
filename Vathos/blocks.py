@@ -71,7 +71,6 @@ class JBlock1d(Layer):
         return x + spatial_out + channel_out
 
 
-
 class ExpandingBlock1d(Layer):
     def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, expand=1):
         super().__init__()
@@ -255,7 +254,6 @@ class ShortConvGatedMixer(Layer):
         g1 = self.conv_1(x)
         g2 = self.activation(self.conv_2(x))
         return self.mixer(g1) * g2 + (1 - g2) * x
-
 
 ########################################################################################################################
 #   TRANSFORMERS
@@ -1005,6 +1003,11 @@ class MultiheadDecoupledAttentionNOV(Layer):
         return self.out_proj(attn_out)
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class CausalMultiheadAttentionMixer(Layer):
     __name__ = "CausalMultiheadAttentionMixer"
     __complexity__ = "O(L^2 d +  L d^2)"
@@ -1014,18 +1017,26 @@ class CausalMultiheadAttentionMixer(Layer):
         assert causal, \
             ("CausalMultiheadAttentionMixLayer only supports causal=True, "
              "if you meant to create a non Causal Attention use the MultiheadAttentionMixer")
+
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
 
+        self.dropout_p = dropout
+
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
+
         if rope:
             self.rope = RoPE(self.head_dim)
         else:
             self.rope = None
 
-        self.dropout = nn.Dropout(dropout)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.out.weight)
 
     def forward(self, x: torch.Tensor):
         B, L, D = x.shape
@@ -1036,9 +1047,13 @@ class CausalMultiheadAttentionMixer(Layer):
         if self.rope is not None:
             q, k = self.rope(q, k)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout_p if self.training else 0.0
+        )
+
+        attn = attn.transpose(1, 2).contiguous().reshape(B, L, D)
 
         return self.out(attn)
 
@@ -1588,7 +1603,8 @@ class SequenceModel(VathosModel):
         if d_modifiers is None:
             d_modifiers = [1 for _ in range(d_model)]
         else:
-            print(f"{NUM} Initialized SequenceModel with d_model structure: {[int(d_model * d) for d in d_modifiers]}{RES}")
+            print(
+                f"{NUM} Initialized SequenceModel with d_model structure: {[int(d_model * d) for d in d_modifiers]}{RES}")
 
         self.pipe = {}
         self.name = name
