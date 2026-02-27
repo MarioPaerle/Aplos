@@ -348,7 +348,7 @@ class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d +  L d^2)"
 
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.00):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
@@ -377,7 +377,6 @@ class MultiheadAttentionMixer(Layer):
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal, dropout_p=0)
         attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
         return self.out(attn)
 
     def generate(self, x: torch.Tensor):
@@ -459,7 +458,6 @@ class MultiheadAttentionMixerNOV(Layer):
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
         attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
         return self.out(attn)
 
     def generate(self, x: torch.Tensor):
