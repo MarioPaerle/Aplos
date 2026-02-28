@@ -255,6 +255,7 @@ class ShortConvGatedMixer(Layer):
         g2 = self.activation(self.conv_2(x))
         return self.mixer(g1) * g2 + (1 - g2) * x
 
+
 ########################################################################################################################
 #   TRANSFORMERS
 ########################################################################################################################
@@ -428,7 +429,7 @@ class MultiheadAttentionMixerNOV(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d +  L d^2)"
 
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
+    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.00):
         super().__init__()
         self.causal = causal
         self.d_model = d_model
@@ -1001,11 +1002,6 @@ class MultiheadDecoupledAttentionNOV(Layer):
         return self.out_proj(attn_out)
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
 class CausalMultiheadAttentionMixer(Layer):
     __name__ = "CausalMultiheadAttentionMixer"
     __complexity__ = "O(L^2 d +  L d^2)"
@@ -1052,6 +1048,63 @@ class CausalMultiheadAttentionMixer(Layer):
         )
 
         attn = attn.transpose(1, 2).contiguous().reshape(B, L, D)
+
+        return self.out(attn)
+
+
+class CausalMultiheadAttentionMixer2(nn.Module):
+    __name__ = "CausalMultiheadAttentionMixer"
+
+    def __init__(self, d_model: int, n_heads: int, causal=True, rope=False, dropout=0.0):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        self.q_norm = RMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim)
+
+        self.rope = RoPE(self.head_dim) if rope else None
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x)
+
+        qkv = qkv.view(B, L, 3, self.n_heads, self.head_dim)
+
+        q, k, v = qkv.unbind(dim=2)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        """q = self.q_norm(q)
+        k = self.k_norm(k)"""
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout_p if self.training else 0.0
+        )
+
+        attn = attn.transpose(1, 2).contiguous().view(B, L, D)
 
         return self.out(attn)
 
@@ -1576,7 +1629,8 @@ class SequenceModel(VathosModel):
                  dropout=0.1,
                  weight_tying=False,
                  norm=nn.LayerNorm,
-                 d_modifiers: List | None = None
+                 d_modifiers: List | None = None,
+                 unet_skips=False
                  ):
         super().__init__()
         self.pad = pad
@@ -1617,6 +1671,10 @@ class SequenceModel(VathosModel):
         self.max_len = max_len
         self.d_model = d_model
         self.n_layers = n_layers
+        self.unet_skips = unet_skips
+
+        if self.unet_skips:
+            self.skip_weights = nn.Parameter(torch.zeros(self.n_layers // 2))
 
         self.embedder = embedder(vocab_size=vocab_size, d_model=d_model, **embedder_args)
 
@@ -1699,10 +1757,18 @@ class SequenceModel(VathosModel):
         if self.pad == 'sqrt':
             n = int((x.shape[1] ** 0.5) + 0.999999)
             x = F.pad(x, (0, 0, 0, n ** 2 - L), mode="constant", value=0)
-        else:
-            pass
 
-        for block in self.blocks:
+        skips = []
+        half_layers = self.n_layers // 2
+
+        for i, block in enumerate(self.blocks):
+            if self.unet_skips:
+                if i < half_layers:
+                    skips.append(x)
+                elif i >= self.n_layers - half_layers:
+                    skip_idx = self.n_layers - 1 - i
+                    x = x + self.skip_weights[skip_idx] * skips[skip_idx]
+
             x = block(x)
 
         if unembed:
