@@ -2142,7 +2142,7 @@ GQANOO = GroupedQueryAttentionNOO
 GQANOV = GroupedQueryAttentionNOV
 Attention = MultiheadAttentionMixer
 AttentionNOV = MultiheadAttentionMixerNOV
-CGQANOV =
+
 if __name__ == "__main__":
     """pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
     unem = ClsHead(768, 10)"""
