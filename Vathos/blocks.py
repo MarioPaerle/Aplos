@@ -1630,8 +1630,8 @@ class SequenceModel(VathosModel):
                  weight_tying=False,
                  norm=nn.LayerNorm,
                  d_modifiers: List | None = None,
-                 unet_skips: bool = False,
-                 weighted_unet_skips: bool = False
+                 unet_skips=False,
+                 unet_weights=False
                  ):
         super().__init__()
         self.pad = pad
@@ -1672,27 +1672,12 @@ class SequenceModel(VathosModel):
         self.max_len = max_len
         self.d_model = d_model
         self.n_layers = n_layers
-
         self.unet_skips = unet_skips
-        self.weighted_unet_skips = weighted_unet_skips
 
         if self.unet_skips:
-            half_layers = self.n_layers // 2
-            if self.weighted_unet_skips:
-                self.skip_projections = nn.ModuleList([
-                    nn.Linear(
-                        int(d_model * d_modifiers[i]),
-                        int(d_model * d_modifiers[self.n_layers - 1 - i]),
-                        bias=False
-                    ) for i in range(half_layers)
-                ])
-                for proj in self.skip_projections:
-                    nn.init.zeros_(proj.weight)
-            else:
-                self.skip_weights = nn.Parameter(torch.zeros(half_layers))
-                if d_modifiers is not None and d_modifiers[:half_layers] != d_modifiers[::-1][:half_layers]:
-                    flag(
-                        f"Warning: U-Net Skips used with asymmetric d_modifiers! Recommend using weighted_unet_skips=True to map dimensions safely.", 2)
+            self.skip_weights = nn.Parameter(torch.zeros(self.n_layers // 2), requires_grad=unet_weights)
+            if d_modifiers is not None:
+                flag("Unet Skips detected, assure d_modifier are symmetrical to make it work!")
 
         self.embedder = embedder(vocab_size=vocab_size, d_model=d_model, **embedder_args)
 
@@ -1785,10 +1770,7 @@ class SequenceModel(VathosModel):
                     skips.append(x)
                 elif i >= self.n_layers - half_layers:
                     skip_idx = self.n_layers - 1 - i
-                    if self.weighted_unet_skips:
-                        x = x + self.skip_projections[skip_idx](skips[skip_idx])
-                    else:
-                        x = x + self.skip_weights[skip_idx] * skips[skip_idx]
+                    x = x + self.skip_weights[skip_idx] * skips[skip_idx]
 
             x = block(x)
 
@@ -1810,6 +1792,23 @@ class SequenceModel(VathosModel):
             for module in block.modules():
                 if hasattr(module, 'clear_cache'):
                     module.clear_cache()
+
+    def forward(self, x: torch.LongTensor, unembed=True):
+        B, L = x.size(0), x.size(1)
+        x = self.embedder(x) * self.embed_scale
+        x = self.pos_encoder(x)
+
+        if self.pad == 'sqrt':
+            n = int((x.shape[1] ** 0.5) + 0.999999)
+            x = F.pad(x, (0, 0, 0, n ** 2 - L), mode="constant", value=0)
+
+        for block in self.blocks:
+            x = block(x)
+
+        if unembed:
+            x = self.unembedder(x)
+
+        return x[:, :L, :]
 
     def _sample_token(self, logits, temperature=1.0, top_p=1.0, top_k=None):
         logits = logits / (temperature + 1e-8)
@@ -1884,20 +1883,7 @@ class SequenceModel(VathosModel):
         if self.pos_encoder is not None and not isinstance(self.pos_encoder, nn.Identity):
             x = self.pos_encoder(x)
 
-        # --- Phase 1: Prompt Processing with Skips ---
-        skips = []
-        half_layers = self.n_layers // 2
-        for i, block in enumerate(self.blocks):
-            if self.unet_skips:
-                if i < half_layers:
-                    skips.append(x)
-                elif i >= self.n_layers - half_layers:
-                    skip_idx = self.n_layers - 1 - i
-                    if self.weighted_unet_skips:
-                        x = x + self.skip_projections[skip_idx](skips[skip_idx])
-                    else:
-                        x = x + self.skip_weights[skip_idx] * skips[skip_idx]
-
+        for block in self.blocks:
             if block.has_custom_generate():
                 x = block.generate(x)
             else:
@@ -1925,19 +1911,7 @@ class SequenceModel(VathosModel):
                 pe_slice = self.pos_encoder.pe[current_pos: current_pos + 1].unsqueeze(0)
                 x_t = x_t + pe_slice
 
-            # --- Phase 2: Token-by-Token Processing with Skips ---
-            skips_t = []
-            for i, block in enumerate(self.blocks):
-                if self.unet_skips:
-                    if i < half_layers:
-                        skips_t.append(x_t)
-                    elif i >= self.n_layers - half_layers:
-                        skip_idx = self.n_layers - 1 - i
-                        if self.weighted_unet_skips:
-                            x_t = x_t + self.skip_projections[skip_idx](skips_t[skip_idx])
-                        else:
-                            x_t = x_t + self.skip_weights[skip_idx] * skips_t[skip_idx]
-
+            for block in self.blocks:
                 if block.has_custom_generate():
                     x_t = block.generate(x_t)
                 else:
@@ -1966,11 +1940,22 @@ class SequenceModel(VathosModel):
                                   repetition_penalty: float) -> torch.Tensor:
         """
         Apply repetition penalty to logits based on previously generated tokens.
+
+        Args:
+            logits: Shape (batch_size, vocab_size)
+            generated: Shape (batch_size, seq_len) - previously generated tokens
+            repetition_penalty: Penalty factor (> 1.0 discourages repetition)
+
+        Returns:
+            Modified logits with repetition penalty applied
         """
         batch_size = logits.shape[0]
 
         for i in range(batch_size):
+            # Get unique tokens in the generated sequence for this batch item
             unique_tokens = generated[i].unique()
+
+            # Apply penalty: divide logits by penalty if positive, multiply if negative
             for token_id in unique_tokens:
                 if logits[i, token_id] > 0:
                     logits[i, token_id] /= repetition_penalty
