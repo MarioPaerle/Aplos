@@ -13,9 +13,39 @@ from Vathos.complexity import combine_big_o_product, combine_big_o_sum
 import math
 import torch.nn.functional as F
 from tqdm import tqdm
+from _spatials import *
 
 
 class Block1d(Layer):
+    def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, norm=nn.LayerNorm):
+        super().__init__()
+        self.spatial_mixer = spatial_mixer
+        self.channel_mixer = channel_mixer
+        self.norm1 = norm(spatial_mixer.d_model)
+        self.norm2 = norm(spatial_mixer.d_model)
+
+    def forward(self, x: torch.Tensor):
+        x = x + self.spatial_mixer(self.norm1(x))
+        x = x + self.channel_mixer(self.norm2(x))
+        return x
+
+    def generate(self, x: torch.Tensor):
+        # Use generate if available, otherwise forward
+        if self.spatial_mixer.has_custom_generate():
+            x = x + self.spatial_mixer.generate(self.norm1(x))
+        else:
+            x = x + self.spatial_mixer(self.norm1(x))
+
+        if self.channel_mixer.has_custom_generate():
+            x = x + self.channel_mixer.generate(self.norm2(x))
+        else:
+            x = x + self.channel_mixer(self.norm2(x))
+
+        return x
+
+
+# TODO: Smear
+class SmearBlock1d(Layer):
     def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, norm=nn.LayerNorm):
         super().__init__()
         self.spatial_mixer = spatial_mixer
@@ -258,927 +288,7 @@ class ShortConvGatedMixer(Layer):
 
 ########################################################################################################################
 #   TRANSFORMERS
-########################################################################################################################
-
-class SinusoidalPositionalEncoding(Layer):
-    __name__ = "SinusoidalPositionalEncoding"
-    __complexity__ = "O(L^2 d^2)"
-
-    def __init__(self, d_model: int, max_len: int = 5000):
-        super().__init__()
-        self.d_model = d_model
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-        return x + self.pe[:L]
-
-
-class RoPE(Layer):
-    __name__ = "RoPE"
-
-    def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
-        super().__init__()
-        self.dim = dim
-        self.base = base
-        self.max_len = max_len
-
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        self._cos_cached = None
-        self._sin_cached = None
-        self._seq_len_cached = 0
-
-    def _update_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device):
-        if seq_len > self._seq_len_cached or self._cos_cached is None:
-            self._seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=device, dtype=dtype)
-            freqs = torch.outer(t, self.inv_freq)
-
-            emb = torch.cat([freqs, freqs], dim=-1)
-            self._cos_cached = emb.cos()
-            self._sin_cached = emb.sin()
-
-    def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                          start_pos: int = 0) -> torch.Tensor:
-        """Apply rotary embeddings starting from start_pos"""
-        seq_len = x.shape[-3] if x.ndim == 4 else x.shape[-2]
-
-        cos = cos[start_pos:start_pos + seq_len]
-        sin = sin[start_pos:start_pos + seq_len]
-
-        cos = cos.unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
-        sin = sin.unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
-
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
-
-    def forward(self, q: torch.Tensor, k: torch.Tensor = None, start_pos: int = 0):
-        """
-        Args:
-            q: Query tensor
-            k: Key tensor (optional)
-            start_pos: Starting position for RoPE (used during generation)
-        """
-        assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
-        if k is not None:
-            assert k.shape == q.shape, "k must have same shape as q"
-
-        seq_len = q.shape[-3] if q.ndim == 4 else q.shape[-2]
-        self._update_cache(start_pos + seq_len, q.dtype, q.device)
-
-        cos = self._cos_cached
-        sin = self._sin_cached
-
-        q_rope = self._apply_rotary_emb(q, cos, sin, start_pos)
-        k_rope = self._apply_rotary_emb(k, cos, sin, start_pos) if k is not None else None
-
-        return (q_rope, k_rope) if k_rope is not None else q_rope
-
-
-class MultiheadAttentionMixer(Layer):
-    __name__ = "MultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d +  L d^2)"
-
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.00):
-        super().__init__()
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-        self.dropout = nn.Dropout(dropout)
-
-        self.kv_cache = None
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=0)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal, dropout_p=0)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        return self.out(attn)
-
-    def generate(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
-
-        # 1. Handle Cache Offset
-        if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
-            pos_offset = k_cache.shape[2]
-        else:
-            pos_offset = 0
-            k_cache, v_cache = None, None
-
-        # 2. Apply RoPE (Rotates the *new* q and k relative to history)
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=pos_offset)
-
-        # 3. Update Cache
-        if k_cache is not None:
-            k = torch.cat([k_cache, k], dim=2)
-            v = torch.cat([v_cache, v], dim=2)
-
-        # Save updated cache
-        self.kv_cache = (k, v)
-
-        # 4. Attention with Dynamic Masking
-        # If L > 1, we are processing a prompt (Prefill), so we MUST be causal.
-        # If L == 1, we are generating a token step-by-step, attending to the whole history.
-        use_causal = self.causal and (L > 1)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
-
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def clear_cache(self):
-        self.kv_cache = None
-
-    def finetune(self):
-        self.qkv.weight.data.requires_grad = False
-        self.out.weight.data.requires_grad = False
-
-
-class MultiheadAttentionMixerNOV(Layer):
-    __name__ = "MultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d +  L d^2)"
-
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.00):
-        super().__init__()
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.qk = nn.Linear(d_model, 2 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-        self.dropout = nn.Dropout(dropout)
-
-        self.kv_cache = None
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
-        q, k = qk.permute(2, 0, 3, 1, 4)
-        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=0)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        return self.out(attn)
-
-    def generate(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
-        q, k = qk.permute(2, 0, 3, 1, 4)
-        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
-
-        if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
-            pos_offset = k_cache.shape[2]
-        else:
-            pos_offset = 0
-            k_cache, v_cache = None, None
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=pos_offset)
-
-        if k_cache is not None:
-            k = torch.cat([k_cache, k], dim=2)
-            v = torch.cat([v_cache, v], dim=2)
-
-        self.kv_cache = (k, v)
-        use_causal = self.causal and (L > 1)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
-
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def clear_cache(self):
-        self.kv_cache = None
-
-    def finetune(self):
-        self.qk.weight.data.requires_grad = False
-        self.out.weight.data.requires_grad = False
-
-
-class FFMultiheadAttentionMixerNOV(Layer):
-    __name__ = "MultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d +  L d^2)"
-
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
-        super().__init__()
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.q = nn.Linear(d_model, d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-        self.dropout = nn.Dropout(dropout)
-
-        self.kv_cache = None
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        q = self.q(x).reshape(B, L, self.n_heads, self.head_dim)
-        q = q.permute(0, 2, 1, 3)
-        k = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=0)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def generate(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
-        q, k = qk.permute(2, 0, 3, 1, 4)
-        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
-
-        if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
-            pos_offset = k_cache.shape[2]
-        else:
-            pos_offset = 0
-            k_cache, v_cache = None, None
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=pos_offset)
-
-        if k_cache is not None:
-            k = torch.cat([k_cache, k], dim=2)
-            v = torch.cat([v_cache, v], dim=2)
-
-        self.kv_cache = (k, v)
-        use_causal = self.causal and (L > 1)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
-
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def clear_cache(self):
-        self.kv_cache = None
-
-    def finetune(self):
-        self.qk.weight.data.requires_grad = False
-        self.out.weight.data.requires_grad = False
-
-
-class FFFMultiheadAttentionMixer(Layer):
-    __name__ = "MultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d +  L d^2)"
-
-    def __init__(self, d_model: int, n_heads: int, causal: bool, rope=False, dropout=0.05):
-        super().__init__()
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.q = LowRankLinear(d_model, d_model, rank=math.isqrt(d_model), bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-        self.dropout = nn.Dropout(dropout)
-
-        self.kv_cache = None
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        q = self.q(x).reshape(B, L, self.n_heads, self.head_dim)
-        q = q.permute(0, 2, 1, 3)
-        k = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = x.view(B, L, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=0)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def generate(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qk = self.qk(x).reshape(B, L, 2, self.n_heads, self.head_dim)
-        q, k = qk.permute(2, 0, 3, 1, 4)
-        v = x.view(B, L, 1, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)[0]
-
-        if self.kv_cache is not None:
-            k_cache, v_cache = self.kv_cache
-            pos_offset = k_cache.shape[2]
-        else:
-            pos_offset = 0
-            k_cache, v_cache = None, None
-
-        if self.rope is not None:
-            q, k = self.rope(q, k, start_pos=pos_offset)
-
-        if k_cache is not None:
-            k = torch.cat([k_cache, k], dim=2)
-            v = torch.cat([v_cache, v], dim=2)
-
-        self.kv_cache = (k, v)
-        use_causal = self.causal and (L > 1)
-
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
-
-        attn = attn.transpose(1, 2).reshape(B, L, D)
-        attn = self.dropout(attn)
-        return self.out(attn)
-
-    def clear_cache(self):
-        self.kv_cache = None
-
-    def finetune(self):
-        self.qk.weight.data.requires_grad = False
-        self.out.weight.data.requires_grad = False
-
-
-class GroupedQueryAttention(Layer):
-    def __init__(
-            self,
-            d_model: int,
-            n_heads: int,
-            n_kv_heads: int,
-            dropout: float = 0.0,
-            bias: bool = False,
-            causal: bool = True
-    ):
-        super().__init__()
-
-        self.d_model = d_model
-        self.num_heads = n_heads
-        self.num_kv_heads = n_kv_heads
-        self.head_dim = d_model // n_heads
-        self.dropout_prob = dropout
-        self.causal = causal
-
-        self.n_rep = self.num_heads // self.num_kv_heads
-
-        if self.d_model % self.num_heads != 0:
-            raise ValueError(f"embed_dim ({d_model}) must be divisible by num_heads ({n_heads})")
-        if self.num_heads % self.num_kv_heads != 0:
-            raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
-
-        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
-        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.kv_proj.weight)
-        nn.init.xavier_uniform_(self.o_proj.weight)
-        if self.q_proj.bias is not None:
-            nn.init.constant_(self.q_proj.bias, 0)
-            nn.init.constant_(self.kv_proj.bias, 0)
-            nn.init.constant_(self.o_proj.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape
-
-        q = self.q_proj(x)
-        kv = self.kv_proj(x)
-
-        q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-
-        kv = kv.view(B, T, self.num_kv_heads, 2, self.head_dim)
-        k, v = kv.unbind(dim=3)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        if self.n_rep > 1:
-            k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
-            v = v[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
-            k = k.reshape(B, self.num_heads, T, self.head_dim)
-            v = v.reshape(B, self.num_heads, T, self.head_dim)
-
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout_prob if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-        return self.o_proj(attn_output)
-
-
-class GroupedQueryAttentionNOV(Layer):
-    def __init__(
-            self,
-            d_model: int,
-            n_heads: int,
-            n_kv_heads: int,
-            dropout: float = 0.0,
-            bias: bool = False,
-            causal: bool = True
-    ):
-        super().__init__()
-
-        self.d_model = d_model
-        self.num_heads = n_heads
-        self.num_kv_heads = n_kv_heads
-        self.head_dim = d_model // n_heads
-        self.dropout_prob = dropout
-        self.causal = causal
-
-        self.n_rep = self.num_heads // self.num_kv_heads
-
-        if self.d_model % self.num_heads != 0:
-            raise ValueError(f"embed_dim ({d_model}) must be divisible by num_heads ({n_heads})")
-        if self.num_heads % self.num_kv_heads != 0:
-            raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
-
-        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=bias)
-        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.k_proj.weight)
-        nn.init.xavier_uniform_(self.o_proj.weight)
-        if self.q_proj.bias is not None:
-            nn.init.constant_(self.q_proj.bias, 0)
-            nn.init.constant_(self.k_proj.bias, 0)
-            nn.init.constant_(self.o_proj.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape
-
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-
-        q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-
-        if self.n_rep > 1:
-            k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
-            k = k.reshape(B, self.num_heads, T, self.head_dim)
-
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout_prob if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-        return self.o_proj(attn_output)
-
-
-class GroupedQueryAttentionNOV2(Layer):
-    def __init__(
-            self,
-            d_model: int,
-            n_heads: int,
-            n_kv_heads: int,
-            dropout: float = 0.0,
-            bias: bool = False,
-            causal: bool = True
-    ):
-        super().__init__()
-
-        self.d_model = d_model
-        self.num_heads = n_heads
-        self.num_kv_heads = n_kv_heads
-        self.head_dim = d_model // n_heads
-        self.dropout_prob = dropout
-        self.causal = causal
-
-        self.n_rep = self.num_heads // self.num_kv_heads
-
-        if self.d_model % self.num_heads != 0:
-            raise ValueError(f"embed_dim ({d_model}) must be divisible by num_heads ({n_heads})")
-        if self.num_heads % self.num_kv_heads != 0:
-            raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
-
-        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=bias)
-        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.trainv = False
-        self.v_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.k_proj.weight)
-        nn.init.xavier_uniform_(self.o_proj.weight)
-        nn.init.eye_(self.v_proj.weight)
-        if self.q_proj.bias is not None:
-            nn.init.constant_(self.q_proj.bias, 0)
-            nn.init.constant_(self.k_proj.bias, 0)
-            nn.init.constant_(self.v_proj.bias, 0)
-            nn.init.constant_(self.o_proj.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape
-
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-
-        q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        if not self.trainv:
-            v = x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        else:
-            v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-
-        if self.n_rep > 1:
-            k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
-            k = k.reshape(B, self.num_heads, T, self.head_dim)
-
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout_prob if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-        return self.o_proj(attn_output)
-
-
-class GroupedQueryAttentionNOO(Layer):
-    def __init__(
-            self,
-            d_model: int,
-            n_heads: int,
-            n_kv_heads: int,
-            dropout: float = 0.0,
-            bias: bool = False,
-            causal: bool = True
-    ):
-        super().__init__()
-
-        self.d_model = d_model
-        self.num_heads = n_heads
-        self.num_kv_heads = n_kv_heads
-        self.head_dim = d_model // n_heads
-        self.dropout_prob = dropout
-        self.causal = causal
-
-        self.n_rep = self.num_heads // self.num_kv_heads
-
-        if self.d_model % self.num_heads != 0:
-            raise ValueError(f"embed_dim ({d_model}) must be divisible by num_heads ({n_heads})")
-        if self.num_heads % self.num_kv_heads != 0:
-            raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
-
-        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.kv_proj.weight)
-        if self.q_proj.bias is not None:
-            nn.init.constant_(self.q_proj.bias, 0)
-            nn.init.constant_(self.kv_proj.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape
-
-        q = self.q_proj(x)
-        kv = self.kv_proj(x)
-
-        q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-
-        kv = kv.view(B, T, self.num_kv_heads, 2, self.head_dim)
-        k, v = kv.unbind(dim=3)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        if self.n_rep > 1:
-            k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
-            v = v[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
-            k = k.reshape(B, self.num_heads, T, self.head_dim)
-            v = v.reshape(B, self.num_heads, T, self.head_dim)
-
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout_prob if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-        return attn_output
-
-
-class MultiheadLatentAttentionMixer(Layer):  # Changed Layer to nn.Module for standard torch
-    __name__ = "MultiheadLatentAttentionMixer"
-    # Adjusted complexity notation
-    __complexity__ = "O(L^2 d + L d * d_kv_lora)"
-
-    def __init__(self, d_model: int, n_heads: int, d_kv_lora: int, causal: bool, rope=False, dropout=0.1):
-        super().__init__()
-        self.causal = causal
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.d_kv_lora = d_kv_lora
-        self.rope_enabled = rope
-
-        self.q = nn.Linear(d_model, d_model, bias=False)
-
-        self.kv_compress = nn.Linear(d_model, d_kv_lora, bias=False)
-        self.k_content_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
-        self.v_decompress = nn.Linear(d_kv_lora, d_model, bias=False)
-
-        self.out = nn.Linear(d_model, d_model, bias=False)
-
-        if self.rope_enabled:
-            self.rope = RoPE(self.head_dim)
-
-        self.dropout = nn.Dropout(dropout)
-
-        nn.init.zeros_(self.out.weight)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-        H = self.n_heads
-        HD = self.head_dim
-
-        q = self.q(x).view(B, L, H, HD).transpose(1, 2)
-
-        c_kv = self.kv_compress(x)
-        k = self.k_content_decompress(c_kv).view(B, L, H, HD).transpose(1, 2)
-        v = self.v_decompress(c_kv).view(B, L, H, HD).transpose(1, 2)
-        if self.rope_enabled:
-            q, k = self.rope(q, k)
-
-        attn = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn = attn.transpose(1, 2).contiguous().view(B, L, D)
-
-        return self.out(attn)
-
-
-class MultiheadDecoupledAttention(Layer):
-    __name__ = "DecoupledSelfAttention"
-    __complexity__ = "O(L^2 * d_qk + L * d_model * (d_qk + d_v))"
-
-    def __init__(self, d_model: int, n_heads: int, qk_dim: int, causal: bool, rope=False, dropout=0.1):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.qk_dim = qk_dim
-        self.v_dim = d_model // n_heads
-        self.causal = causal
-        self.rope_enabled = rope
-
-        self.qk_proj = nn.Linear(d_model, n_heads * 2 * qk_dim, bias=False)
-
-        self.v_proj = nn.Linear(d_model, n_heads * self.v_dim, bias=False)
-
-        self.out_proj = nn.Linear(n_heads * self.v_dim, d_model, bias=False)
-
-        self.dropout = nn.Dropout(dropout)
-
-        if self.rope_enabled:
-            self.rope = RoPE(qk_dim)
-
-        nn.init.zeros_(self.out_proj.weight)
-
-    def forward(self, x: torch.Tensor):
-        B, L, _ = x.shape
-        H = self.n_heads
-
-        q, k = self.qk_proj(x).view(B, L, H, 2 * self.qk_dim).transpose(1, 2).chunk(2, -1)
-
-        v = self.v_proj(x).view(B, L, H, self.v_dim).transpose(1, 2)
-
-        if self.rope_enabled:
-            q, k = self.rope(q, k)
-
-        attn_out = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, H * self.v_dim)
-
-        return self.out_proj(attn_out)
-
-
-class MultiheadDecoupledAttentionNOV(Layer):
-    __name__ = "DecoupledSelfAttention"
-    __complexity__ = "O(L^2 * d_qk + L * d_model * (d_qk + d_v))"
-
-    def __init__(self, d_model: int, n_heads: int, qk_dim: int, causal: bool, rope=False, dropout=0.1):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.qk_dim = qk_dim
-        self.v_dim = d_model // n_heads
-        self.causal = causal
-        self.rope_enabled = rope
-
-        self.qk_proj = nn.Linear(d_model, n_heads * 2 * qk_dim, bias=False)
-
-        self.out_proj = nn.Linear(n_heads * self.v_dim, d_model, bias=False)
-
-        self.dropout = nn.Dropout(dropout)
-
-        if self.rope_enabled:
-            self.rope = RoPE(qk_dim)
-
-        nn.init.zeros_(self.out_proj.weight)
-
-    def forward(self, x: torch.Tensor):
-        B, L, _ = x.shape
-        H = self.n_heads
-
-        q, k = self.qk_proj(x).view(B, L, H, 2 * self.qk_dim).transpose(1, 2).chunk(2, -1)
-
-        v = x.view(B, L, H, self.v_dim).transpose(1, 2)
-
-        if self.rope_enabled:
-            q, k = self.rope(q, k)
-
-        attn_out = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=self.causal
-        )
-
-        attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, H * self.v_dim)
-
-        return self.out_proj(attn_out)
-
-
-class CausalMultiheadAttentionMixer(Layer):
-    __name__ = "CausalMultiheadAttentionMixer"
-    __complexity__ = "O(L^2 d +  L d^2)"
-
-    def __init__(self, d_model: int, n_heads: int, causal=True, rope=False, dropout=0.1):
-        super().__init__()
-        assert causal, \
-            ("CausalMultiheadAttentionMixLayer only supports causal=True, "
-             "if you meant to create a non Causal Attention use the MultiheadAttentionMixer")
-
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        self.dropout_p = dropout
-
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-
-        if rope:
-            self.rope = RoPE(self.head_dim)
-        else:
-            self.rope = None
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qkv.weight)
-        nn.init.xavier_uniform_(self.out.weight)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
-
-        if self.rope is not None:
-            q, k = self.rope(q, k)
-
-        attn = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=True,
-            dropout_p=self.dropout_p if self.training else 0.0
-        )
-
-        attn = attn.transpose(1, 2).contiguous().reshape(B, L, D)
-
-        return self.out(attn)
-
-
-class CausalMultiheadAttentionMixer2(nn.Module):
-    __name__ = "CausalMultiheadAttentionMixer"
-
-    def __init__(self, d_model: int, n_heads: int, causal=True, rope=False, dropout=0.0):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.dropout_p = dropout
-
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-
-        self.q_norm = RMSNorm(self.head_dim)
-        self.k_norm = RMSNorm(self.head_dim)
-
-        self.rope = RoPE(self.head_dim) if rope else None
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qkv.weight)
-        nn.init.xavier_uniform_(self.out.weight)
-
-    def forward(self, x: torch.Tensor):
-        B, L, D = x.shape
-
-        qkv = self.qkv(x)
-
-        qkv = qkv.view(B, L, 3, self.n_heads, self.head_dim)
-
-        q, k, v = qkv.unbind(dim=2)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        """q = self.q_norm(q)
-        k = self.k_norm(k)"""
-
-        if self.rope is not None:
-            q, k = self.rope(q, k)
-
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-
-        attn = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=True,
-            dropout_p=self.dropout_p if self.training else 0.0
-        )
-
-        attn = attn.transpose(1, 2).contiguous().view(B, L, D)
-
-        return self.out(attn)
+#######################################################################################################################
 
 
 class MTransformer(Layer):
@@ -1825,13 +935,9 @@ class SequenceModel(VathosModel):
                             module.weight.data *= depth_scale
 
     def forward(self, x: torch.LongTensor, unembed=True):
-        B, L = x.size(0), x.size(1)
-        x = self.embedder(x) * self.embed_scale
+        # B, L = x.size(0), x.size(1)
+        # x = self.embedder(x) * self.embed_scale
         x = self.pos_encoder(x)
-
-        if self.pad == 'sqrt':
-            n = int((x.shape[1] ** 0.5) + 0.999999)
-            x = F.pad(x, (0, 0, 0, n ** 2 - L), mode="constant", value=0)
 
         skips = []
         half_layers = self.n_layers // 2
@@ -1849,7 +955,7 @@ class SequenceModel(VathosModel):
         if unembed:
             x = self.norm(self.unembedder(x))
 
-        return x[:, :L, :]
+        return x
 
     def insert_block(self, idx, module):
         self.blocks.insert(idx, module)
@@ -2071,6 +1177,103 @@ class SequenceModel(VathosModel):
                 block.spatial_mixer.finetune()
 
 
+class ModdedFormer(VathosModel):
+    def __init__(self, vocab_size: int, embed_dim: int, d_models: List[int], spatials: List[Builder], expand=3,
+                 M_dims: List[int] | None = None, weights_tying=True,
+                 baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        assert d_models[0] == embed_dim, "embed_dim must equal first layer dimension"
+        assert max(d_models) == min(d_models), "Variables d_models is WIP and not working"
+        self.d_models = d_models
+        n_layers = self.n_layer = len(d_models)
+        if M_dims is not None:
+            self.M_dims = M_dims
+        else:
+            assert len(d_models) == len(self.M_dims), "len(M_dims) must be equal to len(d_models)"
+            self.M_dims = [d * expand for d in d_models]
+
+        self.embedder = Embedder(vocab_size, embed_dim)
+        self.unembedder = UnbiasedLinear(d_models[-1], vocab_size)
+        self.spatials = spatials
+        self.norm = norm
+        self.unet = unet_skips
+        self.max_len = max_len
+
+        if weights_tying:  # TODO: This should be removable in mid training!
+            assert d_models[
+                       -1] == embed_dim, "embed_dim must be equal to last hidden dim for weight_tying to be enabled"
+            self.unembedder.linear.weight = self.embedder.embedding.weight
+
+        blocks = []
+        for i in range(n_layers):
+            if i == 0:
+                in_dim = embed_dim
+            else:
+                in_dim = self.d_models[i - 1]
+            out_dim = self.d_models[i]
+            blocks.append(baseblock(
+                self.d_models[i],
+                VariableUDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
+                self.spatials[i](self.d_models[i]),
+                norm=norm
+            ))
+
+        self.blocks = nn.ModuleList(blocks)
+        if zeroskip:
+            self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensot([0])) for _ in range(n_layers)])
+        self.zeroskip = zeroskip
+
+    def forward(self, x):
+        x0 = self.embedder(x)
+        x = x0
+        for i, block in enumerate(self.blocks):
+            if self.zeroskip:
+                x = block(x) + x0 * self.zeroskip_params[i]
+            else:
+                x = block(x)
+
+        x = self.unembedder(x)
+        return x
+
+    def _init_weights(self):
+        std_embed = 0.02
+        try:
+            nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
+        except:
+            pass
+        try:
+            nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
+        except:
+            pass
+
+        for block_idx, block in enumerate(self.blocks):
+            block.channel_mixer._init_weights()
+            try:
+                block.spatial_mixer._init_weights()
+            except:
+                pass
+
+    def summary(self):
+        print(f"Vathos {NUM}ModdedFormer{RES} Summary")
+        print(f"Embedding dim: {self.embed_dim}")
+        for i in range(self.n_layer):
+            if i == 0:
+                in_dim = self.embed_dim
+            else:
+                in_dim = self.d_models[i - 1]
+            out_dim = self.d_models[i]
+            M = self.M_dims[i]
+            print(f"Layer {i}: {in_dim} -> {out_dim}")
+            print(f"\tFFN Dimension: {M}")
+            print(f"\tFFN Activation: {self.blocks[i].channel_mixer.activation}")
+            print(f"Debug {self.blocks[i]}")
+
+        print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
+        print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
+
+
 #######################################################################################################################
 
 def test_causality(module=MTransformer(8, 4, 2)):
@@ -2214,58 +1417,22 @@ GQANOO = GroupedQueryAttentionNOO
 GQANOV = GroupedQueryAttentionNOV
 Attention = MultiheadAttentionMixer
 AttentionNOV = MultiheadAttentionMixerNOV
+CausalAttn = CausalMultiheadAttentionMixer2
 
 if __name__ == "__main__":
-    """pe = PatchEmbedder(img_size=224, patch_size=16, embed_dim=768, cls=True)
-    unem = ClsHead(768, 10)"""
-    x = torch.randint(0, 9, size=(2, 64))
-    """y = pe(img)
-    print(y.shape)
-    print(unem(y).shape)"""
-    # ViT = Symbolic1dSeq2SeqModel(10, 16, 4, 200, pos_encoder=True,
-    #                                                embedder=PatchEmbedder, unembedder=ClsHead,
-    #                                embedder_args={'img_size': 32, 'patch_size': 4})
-    spatial_mixer = HybridAttentionBlock1d
-    attn_params = {
-        'n_heads': 8,
-        'causal': True
-    }
-    sec_mixer = DepthwiseCausalConv1d
-    sec_params = {
-        'k': 3
-    }
-    spatial_params = {
-        'sec_mixer': sec_mixer,
-        'sec_params': sec_params,
-        'attn_params': attn_params
-    }
-    model = SequenceModel(
+    d_models = [64 for i in range(4)]
+    m_dims = [128, 64, 32, 16]
+    attn = Builder(GQA, n_heads=4, n_kv_heads=2)
+    model = ModdedFormer(
         vocab_size=100,
-        d_model=128,
-        n_layers=6,
-        max_len=2116,
-        pos_encoder=True,
-        embedder=EasyEmbedder,
-        unembedder=MultiHeadUnembedder,
-        unembedder_args={'d_model': 128, 'vocab_size': 100, 'k': 4},
-        channel_mixer=F_UDLPSwiGLU,
-        channel_args={'expand': 2},
-        rope=True,
-        spatial_mixer=GroupedQueryAttentionNOV,
-        spatial_args={'n_heads': 8, 'causal': True, 'n_kv_heads': 2}
+        embed_dim=64,
+        d_models=d_models,
+        spatials=[attn for _ in range(len(d_models))],
+        M_dims=m_dims
     )
-    # set_vathos_mode("debug")
-    # model = torch.compile(model)
-    out = model(x).detach()
-    print(out.shape)
-    exit()
     model.summary()
-    model.profile()
-    model.autosave = False
-    model.generate(torch.tensor([0]), 1000, temperature=1, token_end=None, custom_generate=True, repetition_penalty=1.2)
-    model.profile(avg=True, plot=True)
 
-    model.save_checkpoint('caroler.pt')
-    model.load_checkpoint('caroler.pt')
-    model.plot_losses()
-    model.profile(avg=True, plot=True)
+    out = model(
+        torch.randint(0, 99, (2, 128))
+    )
+    print(out.shape)

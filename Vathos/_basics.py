@@ -14,7 +14,6 @@ from collections import OrderedDict, defaultdict
 import re
 import math
 
-
 ACTIVS = {
     'tanh': nn.Tanh,
     'sigmoid': nn.Sigmoid,
@@ -74,23 +73,15 @@ class Layer(nn.Module):
         """
         The Hot-Swappable Entry Point.
         """
-        # 1. PRODUCTION PATH (Fast, Compilable)
-        # torch.compile will optimize this check away as a constant
         if VathosConfig._COMPILABLE:
-            # We explicitly remove 'profile' kwarg if it exists to avoid errors in forward
-            if "profile" in kwargs:
-                del kwargs["profile"]
             return self.forward(*args, **kwargs)
 
-        # 2. DEBUG PATH (Slow, Profilable)
         return self._debug_call(args, kwargs)
 
     def _debug_call(self, args, kwargs):
-        # Lazy registration
         if self._sublayers is None:
             self.register_sublayers()
 
-        # Check local or global profile flag
         do_profile = kwargs.pop("profile", False) or VathosConfig._GLOBAL_PROFILE
 
         if do_profile:
@@ -424,6 +415,8 @@ class ReLU2(Layer):
 
 
 class UDLPReLU2(Layer):
+    """Unbiased Dual Layer Perceptron, Relu^2 Activation"""
+
     def __init__(self, d_model, expand, dropout=0.075):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand, bias=False)
@@ -492,7 +485,7 @@ class DLPSoftmax(Layer):
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.contract = nn.Linear(m, d_model, bias=False)
 
-        self.scaler = nn.Parameter(torch.tensor([1/math.sqrt(d_model)]))
+        self.scaler = nn.Parameter(torch.tensor([1 / math.sqrt(d_model)]))
 
         self.dropout = nn.Dropout(dropout)
 
@@ -560,7 +553,7 @@ class FlashSDLP(Layer):
 
 
 class DLPSwiGLU(Layer):
-    def __init__(self, d_model, expand, dropout=0.05):
+    def __init__(self, d_model, expand, dropout=0.00):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand * 2, bias=True)
         self.contract = nn.Linear(d_model * expand, d_model, bias=True)
@@ -572,7 +565,7 @@ class DLPSwiGLU(Layer):
 
 
 class LowRankGatedDLP(Layer):
-    def __init__(self, d_model, expand, dropout=0.05, activation=nn.SiLU, rank=64, gate_activation=None):
+    def __init__(self, d_model, expand, dropout=0.00, activation=nn.SiLU, rank=64, gate_activation=None):
         super().__init__()
         self.ga = gate_activation if gate_activation is not None else Identity()
         self.act = activation()
@@ -589,12 +582,28 @@ class LowRankGatedDLP(Layer):
 
 
 class UDLPSwiGLU(Layer):
-    def __init__(self, d_model, expand, dropout=0.05):
+    def __init__(self, d_model, expand, dropout=0.00):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand * 2, bias=False)
         self.contract = nn.Linear(d_model * expand, d_model, bias=False)
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class VariableUDLP(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.expand = nn.Linear(d_model, M, bias=False)
+        self.contract = nn.Linear(M, d_output, bias=False)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+        torch.nn.init.zeros_(self.contract.bias)
 
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))
@@ -607,7 +616,7 @@ class F_UDLPSwiGLU(Layer):
         self.contract = nn.Linear(d_model * expand, d_model, bias=False)
         self.LoRA_expand = LowRankLinear(d_model, expand * d_model * 2, lora_rank)
         self.LoRA_contract = LowRankLinear(d_model * expand, d_model, lora_rank)
-        self.scale = 1/lora_rank*2
+        self.scale = 1 / lora_rank * 2
         self.finetuning = False
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
@@ -616,9 +625,9 @@ class F_UDLPSwiGLU(Layer):
         if not self.finetuning:
             return self.dropout(self.contract(self.activation(self.expand(x))))
         else:
-            act = self.activation(self.expand(x) + self.LoRA_expand(x)*self.scale)
+            act = self.activation(self.expand(x) + self.LoRA_expand(x) * self.scale)
             return self.dropout(
-                self.contract(act) + self.LoRA_contract(act)*self.scale
+                self.contract(act) + self.LoRA_contract(act) * self.scale
             )
 
     def finetune(self):
