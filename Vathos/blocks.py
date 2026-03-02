@@ -603,6 +603,7 @@ class VathosModel(Layer):
         self.steps_per_epoch = 0
         self.epochs = 0
         self.finetuning = False
+        self.name = 'VathosModel_defaultName'
 
     def flag_not_training(self):
         if not self.training:
