@@ -1213,7 +1213,8 @@ class ModdedFormer(VathosModel):
             else:
                 in_dim = self.d_models[i - 1]
             out_dim = self.d_models[i]
-            blocks.append(baseblock(
+            blocks.append(
+                baseblock(
                 self.d_models[i],
                 VariableUDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
                 self.spatials[i](self.d_models[i]),
@@ -1224,6 +1225,7 @@ class ModdedFormer(VathosModel):
         if zeroskip:
             self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensot([0])) for _ in range(n_layers)])
         self.zeroskip = zeroskip
+        self._init_weights()
 
     def forward(self, x):
         x0 = self.embedder(x)

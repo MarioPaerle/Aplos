@@ -603,7 +603,6 @@ class VariableUDLP(Layer):
 
     def _init_weights(self):
         torch.nn.init.zeros_(self.contract.weight)
-        torch.nn.init.zeros_(self.contract.bias)
 
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))
