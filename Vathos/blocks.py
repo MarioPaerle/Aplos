@@ -13,7 +13,7 @@ from Vathos.complexity import combine_big_o_product, combine_big_o_sum
 import math
 import torch.nn.functional as F
 from tqdm import tqdm
-from _spatials import *
+from Vathos._spatials import *
 
 
 class Block1d(Layer):
