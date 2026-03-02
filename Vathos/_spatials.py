@@ -1,4 +1,4 @@
-from _basics import *
+from Vathos._basics import *
 
 
 class SinusoidalPositionalEncoding(Layer):
