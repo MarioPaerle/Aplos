@@ -920,3 +920,54 @@ class CausalMultiheadAttentionMixer2(nn.Module):
         attn = attn.transpose(1, 2).contiguous().view(B, L, D)
 
         return self.out(attn)
+
+
+class CausalMultiheadAttentionMixer2NOK(nn.Module):
+    __name__ = "CausalMultiheadAttentionMixer"
+
+    def __init__(self, d_model: int, n_heads: int, causal=True, rope=False, dropout=0.0):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+
+        self.qv = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        self.rope = RoPE(self.head_dim) if rope else None
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+
+    def forward(self, x: torch.Tensor):
+        B, L, D = x.shape
+
+        qv = self.qv(x)
+
+        qv = qv.view(B, L, 2, self.n_heads, self.head_dim)
+
+        q, v = qv.unbind(dim=2)
+
+        q = q.transpose(1, 2)
+        k = x.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout_p if self.training else 0.0
+        )
+
+        attn = attn.transpose(1, 2).contiguous().view(B, L, D)
+
+        return self.out(attn)
