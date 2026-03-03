@@ -45,7 +45,6 @@ class RoPE(nn.Module):
             t = torch.arange(seq_len, device=device, dtype=dtype)
             freqs = torch.outer(t, self.inv_freq.to(device))
 
-            # FIX 1: Do not concatenate. Keep the dimension at dim // 2
             self._cos_cached = freqs.cos()
             self._sin_cached = freqs.sin()
 
@@ -59,7 +58,6 @@ class RoPE(nn.Module):
 
         shape = [1] * x.ndim
         shape[-2] = seq_len
-        # FIX 2: Set the broadcast shape to half the dimension
         shape[-1] = self.dim // 2
 
         cos = cos.view(*shape)
