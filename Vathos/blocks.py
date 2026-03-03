@@ -821,8 +821,6 @@ class SequenceModel(VathosModel):
 
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
-        if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
-            spatial_args = {"causal": True, "n_heads": 8, "rope": rope}
         if spatial_args is None:
             spatial_args = {}
         if channel_args is None:
