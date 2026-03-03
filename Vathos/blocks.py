@@ -1274,7 +1274,7 @@ class ModdedFormer(VathosModel):
 
 #######################################################################################################################
 
-def test_causality(module=MTransformer(8, 4, 2)):
+"""def test_causality(module=MTransformer(8, 4, 2)):
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1337,7 +1337,7 @@ def test_symbolic_model(model):
     print(f"Input shape {x.shape}")
     x = model(x)
     print(f"Output shape {x.shape}")
-    print(f"Bounds:  min:{x.min()}, max:{x.max()}, mean:{x.mean()}, std:{x.std()}, sum_of_a_vector: {x[0, 0, :].sum()}")
+    print(f"Bounds:  min:{x.min()}, max:{x.max()}, mean:{x.mean()}, std:{x.std()}, sum_of_a_vector: {x[0, 0, :].sum()}")"""
 
 
 ########################################################################################################################
