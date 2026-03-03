@@ -23,7 +23,7 @@ class SinusoidalPositionalEncoding(Layer):
         return x + self.pe[:L]
 
 
-class RoPE(Layer):
+class RoPE(nn.Module):
     __name__ = "RoPE"
 
     def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
@@ -43,7 +43,7 @@ class RoPE(Layer):
         if seq_len > self._seq_len_cached or self._cos_cached is None:
             self._seq_len_cached = seq_len
             t = torch.arange(seq_len, device=device, dtype=dtype)
-            freqs = torch.outer(t, self.inv_freq)
+            freqs = torch.outer(t, self.inv_freq.to(device))
 
             emb = torch.cat([freqs, freqs], dim=-1)
             self._cos_cached = emb.cos()
@@ -52,29 +52,27 @@ class RoPE(Layer):
     def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                           start_pos: int = 0) -> torch.Tensor:
         """Apply rotary embeddings starting from start_pos"""
-        seq_len = x.shape[-3] if x.ndim == 4 else x.shape[-2]
+        seq_len = x.shape[-2]
 
         cos = cos[start_pos:start_pos + seq_len]
         sin = sin[start_pos:start_pos + seq_len]
 
-        cos = cos.unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
-        sin = sin.unsqueeze(0).unsqueeze(-2 if x.ndim == 4 else 0)
+        shape = [1] * x.ndim
+        shape[-2] = seq_len
+        shape[-1] = self.dim
+
+        cos = cos.view(*shape)
+        sin = sin.view(*shape)
 
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor = None, start_pos: int = 0):
-        """
-        Args:
-            q: Query tensor
-            k: Key tensor (optional)
-            start_pos: Starting position for RoPE (used during generation)
-        """
         assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
         if k is not None:
-            assert k.shape == q.shape, "k must have same shape as q"
+            assert k.shape[-2:] == q.shape[-2:], "k must have same seq_len and head_dim as q"
 
-        seq_len = q.shape[-3] if q.ndim == 4 else q.shape[-2]
+        seq_len = q.shape[-2]
         self._update_cache(start_pos + seq_len, q.dtype, q.device)
 
         cos = self._cos_cached
@@ -392,6 +390,7 @@ class FFFMultiheadAttentionMixer(Layer):
         self.out.weight.data.requires_grad = False
 
 
+
 class GroupedQueryAttention(Layer):
     def __init__(
             self,
@@ -400,7 +399,8 @@ class GroupedQueryAttention(Layer):
             n_kv_heads: int,
             dropout: float = 0.0,
             bias: bool = False,
-            causal: bool = True
+            causal: bool = True,
+            rope: bool = False
     ):
         super().__init__()
 
@@ -419,9 +419,10 @@ class GroupedQueryAttention(Layer):
             raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
 
         self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-
         self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
+
+        self.rope = RoPE(self.head_dim) if rope else None
 
         self._reset_parameters()
 
@@ -446,6 +447,10 @@ class GroupedQueryAttention(Layer):
         k, v = kv.unbind(dim=3)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        # Apply RoPE BEFORE expansion to save compute
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
         if self.n_rep > 1:
             k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
@@ -471,7 +476,8 @@ class GroupedQueryAttentionNOV(Layer):
             n_kv_heads: int,
             dropout: float = 0.0,
             bias: bool = False,
-            causal: bool = True
+            causal: bool = True,
+            rope: bool = False
     ):
         super().__init__()
 
@@ -493,6 +499,8 @@ class GroupedQueryAttentionNOV(Layer):
         self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
 
+        self.rope = RoPE(self.head_dim) if rope else None
+
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -513,6 +521,10 @@ class GroupedQueryAttentionNOV(Layer):
         q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE BEFORE expansion
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
         if self.n_rep > 1:
             k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
@@ -536,7 +548,8 @@ class GroupedQueryAttentionNOV2(Layer):
             n_kv_heads: int,
             dropout: float = 0.0,
             bias: bool = False,
-            causal: bool = True
+            causal: bool = True,
+            rope: bool = False
     ):
         super().__init__()
 
@@ -560,6 +573,8 @@ class GroupedQueryAttentionNOV2(Layer):
         self.trainv = False
         self.v_proj = nn.Linear(d_model, d_model, bias=bias)
 
+        self.rope = RoPE(self.head_dim) if rope else None
+
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -581,10 +596,15 @@ class GroupedQueryAttentionNOV2(Layer):
 
         q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
         if not self.trainv:
             v = x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         else:
             v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE BEFORE expansion
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
         if self.n_rep > 1:
             k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)
@@ -608,7 +628,8 @@ class GroupedQueryAttentionNOO(Layer):
             n_kv_heads: int,
             dropout: float = 0.0,
             bias: bool = False,
-            causal: bool = True
+            causal: bool = True,
+            rope: bool = False
     ):
         super().__init__()
 
@@ -627,8 +648,9 @@ class GroupedQueryAttentionNOO(Layer):
             raise ValueError(f"num_heads ({n_heads}) must be divisible by num_kv_heads ({n_kv_heads})")
 
         self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-
         self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
+
+        self.rope = RoPE(self.head_dim) if rope else None
 
         self._reset_parameters()
 
@@ -651,6 +673,10 @@ class GroupedQueryAttentionNOO(Layer):
         k, v = kv.unbind(dim=3)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        # Apply RoPE BEFORE expansion
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
         if self.n_rep > 1:
             k = k[:, :, None, :, :].expand(B, self.num_kv_heads, self.n_rep, T, self.head_dim)

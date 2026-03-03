@@ -1271,7 +1271,7 @@ class ModdedFormer(VathosModel):
             print(f"Layer {i}: {in_dim} -> {out_dim}")
             print(f"\tFFN Dimension: {M}")
             print(f"\tFFN Activation: {self.blocks[i].channel_mixer.activation}")
-            print(f"Debug {self.blocks[i]}")
+            # print(f"Debug {self.blocks[i]}")
 
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
