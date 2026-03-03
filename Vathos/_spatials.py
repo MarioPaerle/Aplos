@@ -45,9 +45,9 @@ class RoPE(nn.Module):
             t = torch.arange(seq_len, device=device, dtype=dtype)
             freqs = torch.outer(t, self.inv_freq.to(device))
 
-            emb = torch.cat([freqs, freqs], dim=-1)
-            self._cos_cached = emb.cos()
-            self._sin_cached = emb.sin()
+            # FIX 1: Do not concatenate. Keep the dimension at dim // 2
+            self._cos_cached = freqs.cos()
+            self._sin_cached = freqs.sin()
 
     def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                           start_pos: int = 0) -> torch.Tensor:
@@ -59,7 +59,8 @@ class RoPE(nn.Module):
 
         shape = [1] * x.ndim
         shape[-2] = seq_len
-        shape[-1] = self.dim
+        # FIX 2: Set the broadcast shape to half the dimension
+        shape[-1] = self.dim // 2
 
         cos = cos.view(*shape)
         sin = sin.view(*shape)
@@ -68,6 +69,12 @@ class RoPE(nn.Module):
         return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor = None, start_pos: int = 0):
+        """
+        Args:
+            q: Query tensor
+            k: Key tensor (optional)
+            start_pos: Starting position for RoPE (used during generation)
+        """
         assert q.shape[-1] == self.dim, f"Last dim of q must be {self.dim}, got {q.shape[-1]}"
         if k is not None:
             assert k.shape[-2:] == q.shape[-2:], "k must have same seq_len and head_dim as q"
@@ -388,7 +395,6 @@ class FFFMultiheadAttentionMixer(Layer):
     def finetune(self):
         self.qk.weight.data.requires_grad = False
         self.out.weight.data.requires_grad = False
-
 
 
 class GroupedQueryAttention(Layer):
