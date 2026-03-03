@@ -952,7 +952,7 @@ class CausalMultiheadAttentionMixer2NOK(nn.Module):
         q, v = qv.unbind(dim=2)
 
         q = q.transpose(1, 2)
-        k = x.transpose(1, 2)
+        k = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.transpose(1, 2)
 
         if self.rope is not None:
