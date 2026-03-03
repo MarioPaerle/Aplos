@@ -1414,9 +1414,7 @@ GQA = GroupedQueryAttention
 GQANOO = GroupedQueryAttentionNOO
 GQANOV = GroupedQueryAttentionNOV
 Attention = MultiheadAttentionMixer
-CausalAttn = CausalMultiheadAttentionMixer2
 AttentionNOV = MultiheadAttentionMixerNOV
-AttentionNOK = CausalMultiheadAttentionMixer2NOK
 
 if __name__ == "__main__":
     d_models = [64 for i in range(4)]
