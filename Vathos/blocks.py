@@ -804,7 +804,6 @@ class SequenceModel(VathosModel):
                  spatial_mixer: Layer | nn.Module = MultiheadAttentionMixer,
                  channel_args: dict = None,
                  spatial_args: dict = None,
-                 rope=False,
                  name='',
                  pad='none',
                  baseblock=Block1d,
@@ -818,10 +817,8 @@ class SequenceModel(VathosModel):
                  ):
         super().__init__()
         self.pad = pad
-        if rope and spatial_mixer not in (
-                MultiheadAttentionMixer, MultiheadAttentionMixerNOV, CausalMultiheadAttentionMixer,
-                GroupedQueryAttention):
-            flag("rope=True works only with MultiheadAttentionMixer, which you seem not to be using right?")
+        flag("If you need to use any RoPE or alternative positional encodings which operate directly in the spatial mixer, be sure to call activate it in the spatial_args (e.g. rope=True)", 2)
+
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
         if spatial_args is None and spatial_mixer is MultiheadAttentionMixer:
