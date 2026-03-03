@@ -939,7 +939,7 @@ class CausalMultiheadAttentionMixer2NOK(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.qv.weight)
         nn.init.xavier_uniform_(self.out.weight)
 
     def forward(self, x: torch.Tensor):
