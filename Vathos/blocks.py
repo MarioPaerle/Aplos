@@ -1346,7 +1346,6 @@ NAMES = {
     "MLP": MLP,
     "Attention": MultiheadAttentionMixer,
     "MHA": MultiheadAttentionMixer,
-    "CMHA": CausalMultiheadAttentionMixer,
     "Embed": Embedder,
     "EMBED": Embedder,
     "E": Embedder,

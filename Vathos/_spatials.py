@@ -23,7 +23,7 @@ class SinusoidalPositionalEncoding(Layer):
         return x + self.pe[:L]
 
 
-class RoPE(nn.Module):
+class RoPE(Layer):
     __name__ = "RoPE"
 
     def __init__(self, dim: int, max_len: int = 8192, base: float = 10000.0):
@@ -89,7 +89,7 @@ class RoPE(nn.Module):
         return (q_rope, k_rope) if k_rope is not None else q_rope
 
 
-class YaRN(nn.Module):
+class YaRN(Layer):
     __name__ = "YaRN"
 
     def __init__(self, dim: int, original_max_len: int = 4096, scale: float = 1.0,
@@ -170,7 +170,7 @@ class YaRN(nn.Module):
         return (q_rope, k_rope) if k_rope is not None else q_rope
 
 
-class MultiheadAttentionMixer(nn.Module):
+class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d + L d^2)"
 
@@ -178,16 +178,16 @@ class MultiheadAttentionMixer(nn.Module):
                  pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm=False):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        self.causal   = causal
-        self.d_model  = d_model
-        self.n_heads  = n_heads
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.dropout_p = dropout
 
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
 
-        self.pos_emb  = pos_emb
+        self.pos_emb = pos_emb
         self.kv_cache = None
         self.qk_norm = qk_norm
         if self.qk_norm:
@@ -222,7 +222,6 @@ class MultiheadAttentionMixer(nn.Module):
         return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
 
     def generate(self, x: torch.Tensor) -> torch.Tensor:
-        """Single-step / prefill generation with KV-cache."""
         B, L, D = x.shape
 
         qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
@@ -245,11 +244,10 @@ class MultiheadAttentionMixer(nn.Module):
 
         self.kv_cache = (k, v)
 
-        # is_causal=True only during prefill (L>1); single-step decode needs no mask.
         attn = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=self.causal and (L > 1),
-            dropout_p=0.0,  # never drop during inference
+            dropout_p=0.0,
         )
         return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
 
@@ -257,12 +255,11 @@ class MultiheadAttentionMixer(nn.Module):
         self.kv_cache = None
 
     def finetune(self):
-        """Freeze QKV and output projections; pos_emb stays trainable."""
         self.qkv.weight.requires_grad = False
         self.out.weight.requires_grad = False
 
 
-class MultiheadAttentionMixerNOV(nn.Module):
+class MultiheadAttentionMixerNOV(Layer):
     __name__ = "MultiheadAttentionMixerNOV"
     __complexity__ = "O(L^2 d + L d^2)"
 
@@ -270,16 +267,16 @@ class MultiheadAttentionMixerNOV(nn.Module):
                  pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm=False):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        self.causal   = causal
-        self.d_model  = d_model
-        self.n_heads  = n_heads
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.dropout_p = dropout
 
-        self.qk  = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.qk = nn.Linear(d_model, 2 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
 
-        self.pos_emb  = pos_emb
+        self.pos_emb = pos_emb
         self.kv_cache = None
 
         self.qk_norm = qk_norm
@@ -299,9 +296,10 @@ class MultiheadAttentionMixerNOV(nn.Module):
         qk = self.qk(x).view(B, L, 2, self.n_heads, self.head_dim)
         q, k = qk.unbind(dim=2)
         q, k = q.transpose(1, 2), k.transpose(1, 2)
+
         if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
 
@@ -321,9 +319,10 @@ class MultiheadAttentionMixerNOV(nn.Module):
         qk = self.qk(x).view(B, L, 2, self.n_heads, self.head_dim)
         q, k = qk.unbind(dim=2)
         q, k = q.transpose(1, 2), k.transpose(1, 2)
+
         if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
 
@@ -354,13 +353,7 @@ class MultiheadAttentionMixerNOV(nn.Module):
         self.out.weight.requires_grad = False
 
 
-class GroupedQueryAttention(nn.Module):
-    """
-    Grouped-Query Attention (GQA): n_kv_heads shared K/V heads,
-    each serving (n_heads // n_kv_heads) Q heads.
-
-    K/V expansion uses expand+reshape to avoid materialising extra memory.
-    """
+class GroupedQueryAttention(Layer):
     __name__ = "GroupedQueryAttention"
     __complexity__ = "O(L^2 d + L d^2)"
 
@@ -373,24 +366,24 @@ class GroupedQueryAttention(nn.Module):
         if n_heads % n_kv_heads != 0:
             raise ValueError(f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv_heads})")
 
-        self.d_model     = d_model
-        self.n_heads     = n_heads
-        self.n_kv_heads  = n_kv_heads
-        self.head_dim    = d_model // n_heads
-        self.n_rep       = n_heads // n_kv_heads
-        self.causal      = causal
-        self.dropout_p   = dropout
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.n_rep = n_heads // n_kv_heads
+        self.causal = causal
+        self.dropout_p = dropout
 
-        self.q_proj  = nn.Linear(d_model, d_model, bias=bias)
+        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
         self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=bias)
-        self.o_proj  = nn.Linear(d_model, d_model, bias=bias)
+        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
 
-        self.qk_proj = qk_norm
+        self.qk_norm = qk_norm
         if self.qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
-        self.pos_emb  = pos_emb
+        self.pos_emb = pos_emb
         self.kv_cache = None
 
         self._reset_parameters()
@@ -405,13 +398,12 @@ class GroupedQueryAttention(nn.Module):
             nn.init.zeros_(self.o_proj.bias)
 
     def _expand_kv(self, x: torch.Tensor) -> torch.Tensor:
-        """Expand KV heads to match Q heads without copying memory."""
         if self.n_rep == 1:
             return x
         B, H, L, D = x.shape
         return (x.unsqueeze(2)
-                 .expand(B, H, self.n_rep, L, D)
-                 .reshape(B, H * self.n_rep, L, D))
+                .expand(B, H, self.n_rep, L, D)
+                .reshape(B, H * self.n_rep, L, D))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
@@ -421,9 +413,10 @@ class GroupedQueryAttention(nn.Module):
         kv = self.kv_proj(x).view(B, T, self.n_kv_heads, 2, self.head_dim)
         k, v = kv.unbind(dim=3)
         k, v = k.transpose(1, 2), v.transpose(1, 2)
+
         if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=0)
@@ -438,7 +431,6 @@ class GroupedQueryAttention(nn.Module):
         return self.o_proj(attn.transpose(1, 2).contiguous().view(B, T, C))
 
     def generate(self, x: torch.Tensor) -> torch.Tensor:
-        """KV-cache generation. Cache stores unexpanded KV to save memory."""
         B, T, C = x.shape
 
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
@@ -446,6 +438,10 @@ class GroupedQueryAttention(nn.Module):
         kv = self.kv_proj(x).view(B, T, self.n_kv_heads, 2, self.head_dim)
         k, v = kv.unbind(dim=3)
         k, v = k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
 
@@ -457,7 +453,6 @@ class GroupedQueryAttention(nn.Module):
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
 
-        # Cache unexpanded KV — saves (n_rep - 1)x memory during long generation
         self.kv_cache = (k, v)
 
         k, v = self._expand_kv(k), self._expand_kv(v)
@@ -473,13 +468,13 @@ class GroupedQueryAttention(nn.Module):
         self.kv_cache = None
 
     def finetune(self):
-        """Freeze all projections; pos_emb stays trainable."""
-        self.q_proj.weight.requires_grad  = False
+        self.q_proj.weight.requires_grad = False
         self.kv_proj.weight.requires_grad = False
-        self.o_proj.weight.requires_grad  = False
+        self.o_proj.weight.requires_grad = False
 
 
 class GroupedQueryAttentionNOV(Layer):
+
     def __init__(
             self,
             d_model: int,
@@ -540,8 +535,8 @@ class GroupedQueryAttentionNOV(Layer):
         v = x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
         if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.rope is not None:
             q, k = self.rope(q, k)
