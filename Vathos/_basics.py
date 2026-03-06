@@ -375,6 +375,20 @@ class Linear(Layer):
         return self.linear(x)
 
 
+class ProductLinear(Layer):
+    __name__ = 'Linear'
+
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.weight1 = nn.Parameter(0.1 * torch.randn(output_dim, input_dim))
+        self.weight2 = nn.Parameter(torch.ones(output_dim, input_dim) + 0.01 * torch.randn(output_dim, input_dim))
+
+    def forward(self, x):
+        return F.linear(x, self.weight1 * self.weight2)
+
+
 class LowRankLinear(Layer):
     __name__ = 'Linear'
 
@@ -605,6 +619,21 @@ class VariableUDLP(Layer):
         super().__init__()
         self.expand = nn.Linear(d_model, M, bias=False)
         self.contract = nn.Linear(M, d_output, bias=False)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class ProductUDLP(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.expand = ProductLinear(d_model, M)
+        self.contract = ProductLinear(M, d_output)
         self.activation = activation()
         self.dropout = nn.Dropout(dropout)
 

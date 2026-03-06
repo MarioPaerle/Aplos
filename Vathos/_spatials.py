@@ -518,6 +518,100 @@ class MultiheadAttentionMixerNOVLa2(Layer):
         self.out.weight.requires_grad = False
 
 
+class MultiheadAttentionMixerNOVLa3(Layer):
+    __name__ = "MultiheadAttentionMixerNOV"
+    __complexity__ = "O(L^2 d + L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool = True,
+                 pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm=False):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+
+        self.qk = ProductLinear(d_model, 2 * d_model)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        self.pos_emb = pos_emb
+        self.kv_cache = None
+
+        self.qk_norm = qk_norm
+        if self.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qk.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qk = self.qk(x).view(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.unbind(dim=2)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=self.causal,
+            dropout_p=self.dropout_p if self.training else 0.0,
+        )
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def generate(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qk = self.qk(x).view(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.unbind(dim=2)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=pos_offset)
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+
+        self.kv_cache = (k, v)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=self.causal and (L > 1),
+            dropout_p=0.0,
+        )
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+    def finetune(self):
+        self.qk.weight.requires_grad = False
+        self.out.weight.requires_grad = False
+
+
 class GroupedQueryAttention(Layer):
     __name__ = "GroupedQueryAttention"
     __complexity__ = "O(L^2 d + L d^2)"
