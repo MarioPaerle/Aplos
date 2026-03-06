@@ -26,35 +26,52 @@ ACTIVS = {
 
 
 class VathosConfig:
-    """Global configuration state"""
-    _COMPILABLE = False  # If True, bypasses all profiling for torch.compile compatibility
-    _PROFILE_BATCHED = True
-    _GLOBAL_PROFILE = True
+    """Global configuration state."""
+    _COMPILABLE = False  # True = production, torch.compile safe
+    _PROFILE_BATCHED = True  # True = times divided by batch size
+    _GLOBAL_PROFILE = True  # True = always profile in debug mode
 
 
 def set_vathos_mode(mode: str):
     """
     Switch Vathos mode globally.
 
-    Args:
-        mode (str): "production" or "debug"
+    'debug'      — profiling enabled, torch.compile unfriendly
+    'production' — profiling disabled, torch.compile safe
     """
     if mode.lower() == "production":
         VathosConfig._COMPILABLE = True
-        print(
-            f"{SEC}Vathos:{RES} Switched to {GOOD}PRODUCTION{RES} mode (Ready for torch.compile, Profiling Disabled).")
+        print(f"{SEC}Vathos:{RES} Switched to {GOOD}PRODUCTION{RES} mode.")
     elif mode.lower() == "debug":
         VathosConfig._COMPILABLE = False
-        print(f"{SEC}Vathos:{RES} Switched to {NUM}DEBUG{RES} mode (Profiling Enabled, torch.compile unfriendly).")
+        print(f"{SEC}Vathos:{RES} Switched to {NUM}DEBUG{RES} mode.")
     else:
         raise ValueError("Mode must be 'production' or 'debug'")
 
 
 # =============================================================================
-# THE UNIFIED LAYER
+# BASE LAYER
 # =============================================================================
 
 class Layer(nn.Module):
+    """
+    ─────────────────────────────────────────────────────────────
+    class MyBlock(Layer):
+        def __init__(self, ...):
+            super().__init__()
+            # define sub-modules here
+            self.lin = nn.Linear(...)
+            self.attn = MultiheadAttentionMixer(...)
+
+        def forward(self, x):
+z            return self.lin(x)
+    ─────────────────────────────────────────────────────────────
+
+    DO NOT override __call__. Profiling is handled via native forward hooks,
+    which are registered automatically in debug mode and completely absent
+    in production mode — zero overhead, full torch.compile compatibility.
+    """
+
     _is_vathos_layer = True
 
     def __init__(self):
@@ -63,62 +80,57 @@ class Layer(nn.Module):
         self.__name__ = self.__class__.__name__
 
         self._timer_unbatched = not VathosConfig._PROFILE_BATCHED
-        self._tstart = 0
-        self._tend = 0
-        self._time = 0
+        self._tstart = 0.0
+        self._tend = 0.0
+        self._time = 0.0
         self._times = []
+
         self._sublayers = None
 
-    def __call__(self, *args, **kwargs):
-        """
-        The Hot-Swappable Entry Point.
-        """
-        if VathosConfig._COMPILABLE:
-            return self.forward(*args, **kwargs)
+        # Hooks are registered ONCE at construction in debug mode.
+        # In production mode, no hooks exist — no overhead whatsoever.
+        if not VathosConfig._COMPILABLE and VathosConfig._GLOBAL_PROFILE:
+            self._register_profiling_hooks()
 
-        return self._debug_call(args, kwargs)
+    # -------------------------------------------------------------------------
+    # Profiling hooks — native nn.Module mechanism, __call__ is never touched
+    # -------------------------------------------------------------------------
 
-    def _debug_call(self, args, kwargs):
-        if self._sublayers is None:
-            self.register_sublayers()
+    def _register_profiling_hooks(self):
+        self.register_forward_pre_hook(self._pre_hook)
+        self.register_forward_hook(self._post_hook)
 
-        do_profile = kwargs.pop("profile", False) or VathosConfig._GLOBAL_PROFILE
+    def _pre_hook(self, module, args):
+        self._tstart = timer()
 
-        if do_profile:
-            self._tstart = timer()
+    def _post_hook(self, module, args, output):
+        self._tend = timer()
+        bs = 1
+        if args and isinstance(args[0], torch.Tensor):
+            bs = args[0].shape[0]
+        div = bs if not self._timer_unbatched else 1
+        self._time = (self._tend - self._tstart) / div
+        self._times.append(self._time)
 
-            # Actual Forward Pass
-            rets = self.forward(*args, **kwargs)
-
-            self._tend = timer()
-
-            # Calculate batch size for normalization
-            bs = 1
-            if args and isinstance(args[0], torch.Tensor):
-                bs = args[0].shape[0]
-
-            div = bs if not self._timer_unbatched else 1
-            self._time = (self._tend - self._tstart) / div
-            self._times.append(self._time)
-
-            return rets
-        else:
-            return self.forward(*args, **kwargs)
+    # -------------------------------------------------------------------------
+    # Sublayer registry — used by profile()
+    # -------------------------------------------------------------------------
 
     def register_sublayers(self):
         if self._sublayers is None:
             self._sublayers = dict()
 
         def get_unique_name(base_name, existing_names):
-            if base_name not in existing_names: return base_name
+            if base_name not in existing_names:
+                return base_name
             counter = 1
-            while f"{base_name}_{counter}" in existing_names: counter += 1
+            while f"{base_name}_{counter}" in existing_names:
+                counter += 1
             return f"{base_name}_{counter}"
 
         def collect_layers(module, level=0):
             layers = []
             for name, child in module.named_children():
-                # Check for Vathos Layer marker
                 if getattr(child, "_is_vathos_layer", False):
                     layers.append((name, child, level))
                     layers.extend(collect_layers(child, level=level + 1))
@@ -128,32 +140,32 @@ class Layer(nn.Module):
                             layers.append((f"{name}[{i}]", item, level))
                             layers.extend(collect_layers(item, level=level + 1))
                 elif isinstance(child, nn.Module):
-                    # Recurse into standard modules to find hidden Layers
                     layers.extend(collect_layers(child, level=level))
             return layers
 
-        all_layers = collect_layers(self)
-
-        for original_name, layer, level in all_layers:
+        for original_name, layer, level in collect_layers(self):
             class_name = getattr(layer, "__name__", type(layer).__name__)
             unique_name = get_unique_name(class_name, self._sublayers.keys())
-            self._sublayers[unique_name] = {'layer': layer, 'level': level}
+            self._sublayers[unique_name] = {"layer": layer, "level": level}
 
-    def get_mean_execution_time(self):
-        return np.mean(self._times) if len(self._times) > 0 else 0.0
+    # -------------------------------------------------------------------------
+    # Utilities
+    # -------------------------------------------------------------------------
+
+    def get_mean_execution_time(self) -> float:
+        return float(np.mean(self._times)) if self._times else 0.0
+
+    def has_custom_generate(self) -> bool:
+        return type(self).generate is not Layer.generate
 
     def generate(self, *args, **kwargs):
+        """Override in subclasses that support autoregressive generation."""
         return None
 
-    def has_custom_generate(self):
-        return self.generate.__func__ is not Layer.generate
+    def clear_times(self):
+        """Reset profiling history."""
+        self._times.clear()
 
-    def __repr__(self):
-        return f"{SEC}Vathos{RES}: " + super().__repr__()
-
-    # -------------------------------------------------------------------------
-    # Profiling & Plotting Logic (Preserved from your code)
-    # -------------------------------------------------------------------------
     def profile(self, maxlevel=100, avg=False, plot=False, plot_level=1):
         if VathosConfig._COMPILABLE:
             print(f"{BAD}Cannot profile in PRODUCTION mode.{RES} Run set_vathos_mode('debug') first.")
@@ -167,7 +179,6 @@ class Layer(nn.Module):
         order_map = {}
         order_counter = 0
 
-        # Grouping logic
         if self._sublayers:
             for sublayer_name, sublayer_info in self._sublayers.items():
                 layer = sublayer_info['layer']
@@ -184,7 +195,6 @@ class Layer(nn.Module):
                     grouped_layers[key] = []
                 grouped_layers[key].append((sublayer_name, layer))
 
-        # Printing logic
         if not avg:
             if self._sublayers:
                 for sublayer_name, sublayer_info in self._sublayers.items():
@@ -203,25 +213,19 @@ class Layer(nn.Module):
                 else:
                     print(f"{indent}- {NUM}{base_name}_avg{RES}: no time recorded")
 
-        # Plotting logic
         if plot:
             try:
                 import matplotlib.pyplot as plt
                 level_layers = defaultdict(list)
 
-                # Logic to determine which layers to plot (simplified for robustness)
                 for (base_name, level), layers_list in grouped_layers.items():
-                    # If exact level match
                     if level == plot_level:
                         for _, layer in layers_list:
                             if len(layer._times) > 0:
                                 level_layers[base_name].append(np.mean(layer._times))
 
-                    # If lower level but "leaf" relative to plot_level (simplified heuristic)
                     elif level < plot_level:
-                        # For strict correctness based on your previous code,
-                        # you'd need the parent-child check here.
-                        # Assuming direct plot_level usage for now:
+
                         pass
 
                 if level_layers:
@@ -241,6 +245,9 @@ class Layer(nn.Module):
                     print(f"{SEC}No data for plot level {plot_level}{RES}")
             except ImportError:
                 print(f"{BAD}Matplotlib missing{RES}")
+
+    def __repr__(self):
+        return f"{SEC}Vathos{RES}: " + super().__repr__()
 
 
 class Builder:
@@ -699,7 +706,7 @@ class ConvResBlock(Layer):
         return self.convout(x)
 
 
-class RMSNorm(nn.Module):  # Assumo Layer erediti da nn.Module
+class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps

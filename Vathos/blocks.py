@@ -286,55 +286,6 @@ class ShortConvGatedMixer(Layer):
         return self.mixer(g1) * g2 + (1 - g2) * x
 
 
-########################################################################################################################
-#   TRANSFORMERS
-#######################################################################################################################
-
-
-class MTransformer(Layer):
-    def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True):
-        super().__init__()
-        self.d_model = d_model
-
-        self.blocks = nn.ModuleList([
-            Block1d(
-                d_model=d_model,
-                channel_mixer=MLP(d_model, depth=2, expand=mlp_expand, activation=SwiGLU),
-                spatial_mixer=CausalMultiheadAttentionMixer(d_model, n_heads, causal=causal)
-            )
-            for _ in range(n_layers)
-        ])
-
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x: torch.Tensor):
-        for block in self.blocks:
-            x = block(x)
-        return self.norm(x)
-
-
-class _MTemplate(Layer):
-    def __init__(self, d_model: int, n_layers: int, n_heads: int = 8, mlp_expand: int = 4, causal: bool = True,
-                 channel_mixer=MLP, spatial_mixer=MultiheadAttentionMixer):
-        super().__init__()
-        self.d_model = d_model
-
-        self.blocks = nn.ModuleList([
-            Block1d(
-                channel_mixer=channel_mixer(d_model, depth=2, expand=mlp_expand, activation=nn.GELU),
-                spatial_mixer=spatial_mixer(d_model, n_heads, causal=causal)
-            )
-            for _ in range(n_layers)
-        ])
-
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x: torch.Tensor):
-        for block in self.blocks:
-            x = block(x)
-        return self.norm(x)
-
-
 class Embedder(Layer):
     __name__ = "SymbolicEmbedder"
     __complexity__ = "O(L d)"
@@ -789,7 +740,6 @@ class VathosModel(Layer):
 #   Assemblers
 ########################################################################################################################
 
-
 class SequenceModel(VathosModel):
     __name__ = "SequenceModel"
 
@@ -817,7 +767,9 @@ class SequenceModel(VathosModel):
                  ):
         super().__init__()
         self.pad = pad
-        flag("If you need to use any RoPE or alternative positional encodings which operate directly in the spatial mixer, be sure to call activate it in the spatial_args (e.g. rope=True)", 2)
+        flag(
+            "If you need to use any RoPE or alternative positional encodings which operate directly in the spatial mixer, be sure to call activate it in the spatial_args (e.g. rope=True)",
+            2)
 
         if channel_args is None and channel_mixer is MLP:
             channel_args = {"expand": 2, "activation": nn.GELU, "depth": 2}
@@ -1211,11 +1163,11 @@ class ModdedFormer(VathosModel):
             out_dim = self.d_models[i]
             blocks.append(
                 baseblock(
-                self.d_models[i],
-                VariableUDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
-                self.spatials[i](self.d_models[i]),
-                norm=norm
-            ))
+                    self.d_models[i],
+                    VariableUDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
+                    self.spatials[i](self.d_models[i]),
+                    norm=norm
+                ))
 
         self.blocks = nn.ModuleList(blocks)
         if zeroskip:
@@ -1270,6 +1222,8 @@ class ModdedFormer(VathosModel):
 
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
+
+
 
 
 #######################################################################################################################
@@ -1338,7 +1292,6 @@ def test_symbolic_model(model):
     x = model(x)
     print(f"Output shape {x.shape}")
     print(f"Bounds:  min:{x.min()}, max:{x.max()}, mean:{x.mean()}, std:{x.std()}, sum_of_a_vector: {x[0, 0, :].sum()}")"""
-
 
 ########################################################################################################################
 
@@ -1414,6 +1367,7 @@ GQANOO = GroupedQueryAttentionNOO
 GQANOV = GroupedQueryAttentionNOV
 Attention = MultiheadAttentionMixer
 AttentionNOV = MultiheadAttentionMixerNOV
+NOVLa2 = MultiheadAttentionMixerNOVLa2
 
 if __name__ == "__main__":
     d_models = [64 for i in range(4)]
@@ -1432,3 +1386,5 @@ if __name__ == "__main__":
         torch.randint(0, 99, (2, 128))
     )
     print(out.shape)
+
+    model.profile()

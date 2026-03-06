@@ -170,6 +170,77 @@ class YaRN(Layer):
         return (q_rope, k_rope) if k_rope is not None else q_rope
 
 
+class NanoYaRN(Layer):
+    """Modded Nano-Gpt implmenetation of YaRN"""
+    def __init__(self, head_dim, max_seq_len, paired=False):
+        super().__init__()
+        self.head_dim = head_dim
+        self.max_seq_len = max_seq_len
+        self.paired = paired
+        self.reset()
+
+    def rotary(self, x_BTHD):
+        assert self.factor1.size(0) >= x_BTHD.size(-3)
+        factor1, factor2 = (
+            self.factor1[None, : x_BTHD.size(-3), None, :],
+            self.factor2[None, : x_BTHD.size(-3), None, :],
+        )
+        x_flip = x_BTHD.view(*x_BTHD.shape[:-1], x_BTHD.shape[-1] // 2, 2).flip(-1).view(x_BTHD.shape)
+        return factor1 * x_BTHD + factor2 * x_flip
+
+    def reset(self):
+        angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=self.head_dim//4, dtype=torch.float32)
+        angular_freq = angular_freq.repeat_interleave(2)
+        # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
+        angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(self.head_dim//2)])
+        t = torch.arange(2*self.max_seq_len, dtype=torch.float32)
+        if not self.paired:
+            theta = torch.outer(t, angular_freq)
+            self.factor1 = nn.Buffer(
+                theta.cos().to(torch.bfloat16), persistent=False
+            )
+            self.factor2 = nn.Buffer(
+                theta.sin().to(torch.bfloat16), persistent=False
+            )
+        else:
+            t_even = 2 * t
+            t_odd = 2 * t + 1
+            theta1 = torch.outer(t_even, angular_freq)
+            theta2 = torch.outer(t_odd, angular_freq)
+            self.factor1 = nn.Buffer(
+                torch.cat((theta1.cos(), theta2.cos()), dim=-1).to(torch.bfloat16),
+                persistent=False
+            )
+            self.factor2 = nn.Buffer(
+                torch.cat((theta1.sin(), theta2.sin()), dim=-1).to(torch.bfloat16),
+                persistent=False
+            )
+        self.factor2[..., 1::2] *= -1
+        self.angular_freq = angular_freq
+        # start with 0.1, inspired by 0.12 from @leloykun and learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
+        self.attn_scale = 0.1
+
+    def apply(self, old_window: int, new_window: int, alpha: int=1, beta: int=32):
+        rotations = old_window * self.angular_freq / (2 * torch.pi)
+        scaling_factor = old_window / new_window
+        interpolation_weight = torch.clamp((rotations - alpha) / (beta - alpha), 0, 1)
+        self.angular_freq *= scaling_factor + interpolation_weight * (1 - scaling_factor)
+        t = torch.arange(2*self.max_seq_len, dtype=torch.float32, device=self.angular_freq.device)
+        if not self.paired:
+            theta = torch.outer(t, self.angular_freq)
+            self.factor1.copy_(theta.cos())
+            self.factor2.copy_(theta.sin())
+        else:
+            t_even = 2 * t
+            t_odd = 2 * t + 1
+            theta1 = torch.outer(t_even, self.angular_freq)
+            theta2 = torch.outer(t_odd, self.angular_freq)
+            self.factor1.copy_(torch.cat((theta1.cos(), theta2.cos()), dim=-1))
+            self.factor2.copy_(torch.cat((theta1.sin(), theta2.sin()), dim=-1))
+        self.factor2[..., 1::2] *= -1
+        self.attn_scale *= 0.2 * math.log(new_window / old_window) + 1
+
+
 class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d + L d^2)"
@@ -301,6 +372,100 @@ class MultiheadAttentionMixerNOV(Layer):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
+        v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=self.causal,
+            dropout_p=self.dropout_p if self.training else 0.0,
+        )
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def generate(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qk = self.qk(x).view(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.unbind(dim=2)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=pos_offset)
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+
+        self.kv_cache = (k, v)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=self.causal and (L > 1),
+            dropout_p=0.0,
+        )
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+    def finetune(self):
+        self.qk.weight.requires_grad = False
+        self.out.weight.requires_grad = False
+
+
+class MultiheadAttentionMixerNOVLa2(Layer):
+    __name__ = "MultiheadAttentionMixerNOV"
+    __complexity__ = "O(L^2 d + L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool = True,
+                 pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm=False):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+
+        self.qk = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.sec = nn.Linear(d_model, d_model)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        self.pos_emb = pos_emb
+        self.kv_cache = None
+
+        self.qk_norm = qk_norm
+        if self.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qk.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qk = self.qk(self.sec(x)).view(B, L, 2, self.n_heads, self.head_dim)
+        q, k = qk.unbind(dim=2)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
         v = x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
 
         if self.pos_emb is not None:
@@ -1057,4 +1222,3 @@ class FFFMultiheadAttentionMixer(Layer):
     def finetune(self):
         self.qk.weight.data.requires_grad = False
         self.out.weight.data.requires_grad = False
-
