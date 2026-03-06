@@ -546,7 +546,6 @@ class MultiheadAttentionMixerNOVLa3(Layer):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qk.weight)
         nn.init.xavier_uniform_(self.out.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
