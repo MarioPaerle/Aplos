@@ -427,12 +427,39 @@ class SwiGLU(Layer):
 
 
 class ReLU2(Layer):
-    gated = True
+    gated = False
     __name__ = "ReLU^2"
     __complexity__ = "O(L)"
 
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = F.relu(x)
+        return x_pos * x_pos
+
+
+class LeLU2(Layer):
+    gated = False
+    __name__ = "ReLU^2"
+    __complexity__ = "O(L)"
+
+    def __init__(self):
+        super().__init__()
+        self.a = nn.Parameter( torch.randn(1) - 0.05)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = F.relu(x - self.a)
+        return x_pos * x_pos
+
+
+class PReLU2(Layer):
+    def __init__(self, num_parameters=1):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(num_parameters))
+
     def forward(self, x: torch.Tensor):
-        return torch.relu(x).square()
+        return self.alpha * torch.square(F.relu(x))
 
 
 class UDLPReLU2(Layer):
