@@ -1128,7 +1128,7 @@ class SequenceModel(VathosModel):
 class ModdedFormer(VathosModel):
     def __init__(self, vocab_size: int, embed_dim: int, d_models: List[int], spatials: List[Builder], expand=3,
                  M_dims: List[int] | None = None, weights_tying=True,
-                 baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False):
+                 baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False, UDLP=VariableUDLP):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -1164,7 +1164,7 @@ class ModdedFormer(VathosModel):
             blocks.append(
                 baseblock(
                     self.d_models[i],
-                    VariableUDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
+                    UDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
                     self.spatials[i](self.d_models[i]),
                     norm=norm
                 ))

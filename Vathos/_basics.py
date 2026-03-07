@@ -676,11 +676,26 @@ class VariableUDLP(Layer):
         return self.dropout(self.contract(self.activation(self.expand(x))))
 
 
-class ProductUDLP(Layer):
+class VariableUDLP(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.expand = nn.Linear(d_model, M, bias=False)
+        self.contract = nn.Linear(M, d_output, bias=False)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class DoubleUDLP(Layer):
     def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
         super().__init__()
         self.expand = DoubleLinear(d_model, M)
-        self.contract = DoubleLinear(M, d_output)
+        self.contract = Linear(M, d_output)
         self.activation = activation()
         self.dropout = nn.Dropout(dropout)
 
