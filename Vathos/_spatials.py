@@ -439,7 +439,7 @@ class MultiheadAttentionMixerNOVLa2(Layer):
         self.dropout_p = dropout
 
         self.qk = nn.Linear(d_model, 2 * d_model, bias=False)
-        self.sec = nn.Linear(d_model, d_model)
+        self.sec = nn.Linear(d_model, d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
 
         self.pos_emb = pos_emb
@@ -450,11 +450,12 @@ class MultiheadAttentionMixerNOVLa2(Layer):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
-        self._reset_parameters()
+        self._init_weights()
 
-    def _reset_parameters(self):
+    def _init_weights(self):
         nn.init.xavier_uniform_(self.qk.weight)
         nn.init.xavier_uniform_(self.out.weight)
+        nn.init.xavier_uniform_(self.sec.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, D = x.shape
@@ -543,9 +544,9 @@ class MultiheadAttentionMixerNOVLa3(Layer):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
-        self._reset_parameters()
+        self._init_weights()
 
-    def _reset_parameters(self):
+    def _init_weights(self):
         nn.init.xavier_uniform_(self.out.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

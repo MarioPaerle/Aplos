@@ -383,7 +383,7 @@ class ProductLinear(Layer):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.weight1 = nn.Parameter(0.1 * torch.randn(output_dim, input_dim))
-        self.weight2 = nn.Parameter(torch.ones(output_dim, input_dim) + 0.01 * torch.randn(output_dim, input_dim))
+        self.weight2 = nn.Parameter(torch.ones(output_dim, input_dim + 0.01 * torch.randn(output_dim, input_dim)))
 
     def forward(self, x):
         return F.linear(x, self.weight1 * self.weight2)
@@ -399,11 +399,10 @@ class DoubleLinear(nn.Module):
         self.out_features = out_features
 
         self.weight1 = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
-        std = 1.0 / math.sqrt(in_features) if in_features > 0 else 0.0
-        nn.init.normal_(self.weight1, mean=0.0, std=std)
+        nn.init.xavier_uniform_(self.weight1)
 
         self.weight2 = nn.Parameter(torch.empty((in_features, in_features), **factory_kwargs))
-        nn.init.normal_(self.weight2, mean=0.0, std=std)
+        nn.init.xavier_uniform_(self.weight2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         W_eff = self.weight1 @ self.weight2
