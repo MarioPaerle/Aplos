@@ -402,10 +402,8 @@ class DoubleLinear(nn.Module):
         std = 1.0 / math.sqrt(in_features) if in_features > 0 else 0.0
         nn.init.normal_(self.weight1, mean=0.0, std=std)
 
-        noise_std = 0.01 * std
-        w2_init = torch.eye(in_features, **factory_kwargs) + \
-                  torch.randn((in_features, in_features), **factory_kwargs) * noise_std
-        self.weight2 = nn.Parameter(w2_init)
+        self.weight2 = nn.Parameter(torch.empty((in_features, in_features), **factory_kwargs))
+        nn.init.normal_(self.weight2, mean=0.0, std=std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         W_eff = self.weight1 @ self.weight2
