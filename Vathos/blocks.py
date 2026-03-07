@@ -149,13 +149,13 @@ class DepthwiseCausalConv1d(Layer):
     __name__ = "CausalConv1d"
     __complexity__ = "O(L d k)"
 
-    def __init__(self, d, k=3):
+    def __init__(self, d_model, k=3):
         super().__init__()
-        self.d = d
+        self.d_model = d_model
         self.k = k
         self.pad = k - 1
 
-        self.K = nn.Parameter(torch.randn(d, k) / (k ** 0.5))
+        self.K = nn.Parameter(torch.randn(d_model, k) / (k ** 0.5))
 
     def forward(self, x):
         b, L, d = x.shape
