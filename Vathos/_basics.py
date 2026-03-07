@@ -389,6 +389,29 @@ class ProductLinear(Layer):
         return F.linear(x, self.weight1 * self.weight2)
 
 
+class DoubleLinear(nn.Module):
+    def __init__(self, in_features: int, out_features: int,
+                 device=None, dtype=None):
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.weight1 = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        std = 1.0 / math.sqrt(in_features) if in_features > 0 else 0.0
+        nn.init.normal_(self.weight1, mean=0.0, std=std)
+
+        noise_std = 0.01 * std
+        w2_init = torch.eye(in_features, **factory_kwargs) + \
+                  torch.randn((in_features, in_features), **factory_kwargs) * noise_std
+        self.weight2 = nn.Parameter(w2_init)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        W_eff = self.weight1 @ self.weight2
+        return F.linear(x, W_eff)
+
+
 class LowRankLinear(Layer):
     __name__ = 'Linear'
 
@@ -446,7 +469,7 @@ class LeLU2(Layer):
 
     def __init__(self):
         super().__init__()
-        self.a = nn.Parameter( torch.randn(1) - 0.05)
+        self.a = nn.Parameter(torch.randn(1) - 0.05)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_pos = F.relu(x - self.a)
@@ -659,8 +682,8 @@ class VariableUDLP(Layer):
 class ProductUDLP(Layer):
     def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
         super().__init__()
-        self.expand = ProductLinear(d_model, M)
-        self.contract = ProductLinear(M, d_output)
+        self.expand = DoubleLinear(d_model, M)
+        self.contract = DoubleLinear(M, d_output)
         self.activation = activation()
         self.dropout = nn.Dropout(dropout)
 
