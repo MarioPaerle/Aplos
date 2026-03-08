@@ -1128,7 +1128,9 @@ class SequenceModel(VathosModel):
 class ModdedFormer(VathosModel):
     def __init__(self, vocab_size: int, embed_dim: int, d_models: List[int], spatials: List[Builder], expand=3,
                  M_dims: List[int] | None = None, weights_tying=True,
-                 baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False, UDLP=VariableUDLP):
+                 baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False,
+                 UDLP=VariableUDLP,
+                 skips: List[int | None] | None = None):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -1136,10 +1138,10 @@ class ModdedFormer(VathosModel):
         assert max(d_models) == min(d_models), "Variables d_models is WIP and not working"
         self.d_models = d_models
         n_layers = self.n_layer = len(d_models)
+
         if M_dims is not None:
             self.M_dims = M_dims
         else:
-            assert len(d_models) == len(self.M_dims), "len(M_dims) must be equal to len(d_models)"
             self.M_dims = [d * expand for d in d_models]
 
         self.embedder = Embedder(vocab_size, embed_dim)
@@ -1148,43 +1150,64 @@ class ModdedFormer(VathosModel):
         self.norm = norm
         self.unet = unet_skips
         self.max_len = max_len
+        self.zeroskip = zeroskip
 
-        if weights_tying:  # TODO: This should be removable in mid training!
-            assert d_models[
-                       -1] == embed_dim, "embed_dim must be equal to last hidden dim for weight_tying to be enabled"
+        self.skips = skips if skips is not None else [None] * n_layers
+        assert len(self.skips) == n_layers, "Skip lists length must equal n_layers"
+
+        self.skip_lambdas = nn.ParameterDict()
+        for source_idx, target_idx in enumerate(self.skips):
+            if target_idx is not None:
+                assert target_idx > source_idx, f"Skip {source_idx}->{target_idx} will result in non-causal modeling"
+                assert target_idx < n_layers, f"Skip {target_idx} points at layer {source_idx} but model has only {n_layers} layers"
+                self.skip_lambdas[f"route_{source_idx}_to_{target_idx}"] = nn.Parameter(torch.zeros(1))
+
+        if weights_tying:
+            assert d_models[-1] == embed_dim, "embed_dim must be equal to last hidden dim for weight_tying"
             self.unembedder.linear.weight = self.embedder.embedding.weight
 
         blocks = []
         for i in range(n_layers):
-            if i == 0:
-                in_dim = embed_dim
-            else:
-                in_dim = self.d_models[i - 1]
+            in_dim = embed_dim if i == 0 else self.d_models[i - 1]
             out_dim = self.d_models[i]
             blocks.append(
                 baseblock(
                     self.d_models[i],
-                    UDLP(in_dim, d_output=out_dim, M=M_dims[i], activation=ffn_act),
+                    UDLP(in_dim, d_output=out_dim, M=self.M_dims[i], activation=ffn_act),
                     self.spatials[i](self.d_models[i]),
                     norm=norm
                 ))
 
         self.blocks = nn.ModuleList(blocks)
         if zeroskip:
-            self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensot([0])) for _ in range(n_layers)])
-        self.zeroskip = zeroskip
+            self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensor([0.0])) for _ in range(n_layers)])
+
+        self.final_norm = RMSNorm(d_models[-1])
         self._init_weights()
 
     def forward(self, x):
         x0 = self.embedder(x)
         x = x0
+
+        active_skips = {}
+
         for i, block in enumerate(self.blocks):
             if self.zeroskip:
                 x = block(x) + x0 * self.zeroskip_params[i]
             else:
                 x = block(x)
 
-        x = self.unembedder(x)
+            for source_idx, target_idx in enumerate(self.skips):
+                if target_idx == i:
+                    gate = self.skip_lambdas[f"route_{source_idx}_to_{target_idx}"]
+                    x = x + gate * active_skips[source_idx]
+
+                    del active_skips[source_idx]
+
+            if self.skips[i] is not None:
+                active_skips[i] = x
+
+        x = self.unembedder(self.final_norm(x))
         return x
 
     def _init_weights(self):
@@ -1208,6 +1231,7 @@ class ModdedFormer(VathosModel):
     def summary(self):
         print(f"Vathos {NUM}ModdedFormer{RES} Summary")
         print(f"Embedding dim: {self.embed_dim}")
+        print(f"Skips: {self.skips}")
         for i in range(self.n_layer):
             if i == 0:
                 in_dim = self.embed_dim
@@ -1216,13 +1240,12 @@ class ModdedFormer(VathosModel):
             out_dim = self.d_models[i]
             M = self.M_dims[i]
             print(f"Layer {i}: {in_dim} -> {out_dim}")
+            print(f"Block: {i}: {self.blocks[i]}")
             print(f"\tFFN Dimension: {M}")
             print(f"\tFFN Activation: {self.blocks[i].channel_mixer.activation}")
-            # print(f"Debug {self.blocks[i]}")
 
         print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
-
 
 
 
