@@ -705,6 +705,7 @@ class DoubleUDLP(Layer):
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))
 
+
 class M_UDLP(Layer):
     def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
         super().__init__()

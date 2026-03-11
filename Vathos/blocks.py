@@ -44,6 +44,35 @@ class Block1d(Layer):
         return x
 
 
+class CBlock1d(Layer):
+    def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, norm=nn.LayerNorm):
+        super().__init__()
+        self.spatial_mixer = spatial_mixer
+        self.channel_mixer = channel_mixer
+        self.norm1 = norm(spatial_mixer.d_model)
+        self.norm2 = norm(spatial_mixer.d_model)
+        self.l = nn.Parameter(torch.tensor([0.5, 0.5, 0.5, 0.5]))
+
+    def forward(self, x: torch.Tensor):
+        x = x * self.l[0] + self.spatial_mixer(self.norm1(x)) * self.l[1]
+        x = x * self.l[2] + self.channel_mixer(self.norm2(x)) * self.l[3]
+        return x
+
+    def generate(self, x: torch.Tensor):
+        # Use generate if available, otherwise forward
+        if self.spatial_mixer.has_custom_generate():
+            x = x + self.spatial_mixer.generate(self.norm1(x))
+        else:
+            x = x + self.spatial_mixer(self.norm1(x))
+
+        if self.channel_mixer.has_custom_generate():
+            x = x + self.channel_mixer.generate(self.norm2(x))
+        else:
+            x = x + self.channel_mixer(self.norm2(x))
+
+        return x
+
+
 # TODO: Smear
 class SmearBlock1d(Layer):
     def __init__(self, d_model, channel_mixer: Layer, spatial_mixer: Layer, norm=nn.LayerNorm):
@@ -1248,7 +1277,6 @@ class ModdedFormer(VathosModel):
         print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
 
 
-
 #######################################################################################################################
 
 """def test_causality(module=MTransformer(8, 4, 2)):
@@ -1401,7 +1429,8 @@ if __name__ == "__main__":
         embed_dim=64,
         d_models=d_models,
         spatials=[attn for _ in range(len(d_models))],
-        M_dims=m_dims
+        M_dims=m_dims,
+        skips=[None, 3, None, None]
     )
     model.summary()
 

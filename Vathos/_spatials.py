@@ -292,6 +292,33 @@ class MultiheadAttentionMixer(Layer):
         )
         return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
 
+    def show_weights_forward(self, x):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+
+        scale = 1.0 / math.sqrt(self.head_dim)
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+        if self.causal:
+            mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=x.device), diagonal=1)
+            scores.masked_fill_(mask, float('-inf'))
+
+        attn_weights = F.softmax(scores, dim=-1)
+        attn = torch.matmul(attn_weights, v)
+
+        out = self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+        return out, attn_weights
+
     def generate(self, x: torch.Tensor) -> torch.Tensor:
         B, L, D = x.shape
 
