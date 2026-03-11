@@ -295,6 +295,19 @@ class Skip(Layer):
         return self.layer(x) + x
 
 
+class LearntSkip(Layer):
+    __name__ = "Skip"
+    __complexity__ = "O(1)"
+
+    def __init__(self, layer):
+        super().__init__()
+        self.layer = layer
+        self.w = nn.Parameter(torch.tensor([1.0, 1.0]), requires_grad=True)
+
+    def forward(self, x):
+        return self.layer(x)*self.w[0] + x*self.w[1]
+
+
 class IdentityMixer(Layer):
     __name__ = "Identity"
     __complexity__ = "O(1)"
