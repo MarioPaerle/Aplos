@@ -845,3 +845,22 @@ class EMA:
         for name, param in model.named_parameters():
             if param.requires_grad:
                 param.data.copy_(self.shadow[name])
+
+
+class Nova(Layer):
+    def __init__(self):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor([0.7]))
+
+    def forward(self, x):
+        h = -self.beta * x
+        return x * (torch.sigmoid(-h) - (1 / (1 + h**2)))
+
+class MinusNova(Layer):
+    def __init__(self):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor([0.7]))
+
+    def forward(self, x):
+        h = -self.beta * -x
+        return x * (torch.sigmoid(-h) - (1 / (1 + h**2)))
