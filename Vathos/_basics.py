@@ -305,7 +305,7 @@ class LearntSkip(Layer):
         self.w = nn.Parameter(torch.tensor([1.0, 1.0]), requires_grad=True)
 
     def forward(self, x):
-        return self.layer(x)*self.w[0] + x*self.w[1]
+        return self.layer(x) * self.w[0] + x * self.w[1]
 
 
 class IdentityMixer(Layer):
@@ -867,7 +867,8 @@ class Nova(Layer):
 
     def forward(self, x):
         h = -self.beta * x
-        return x * (torch.sigmoid(-h) - (1 / (1 + h**2)))
+        return x * (torch.sigmoid(-h) - (1 / (1 + h ** 2)))
+
 
 class MinusNova(Layer):
     def __init__(self):
@@ -876,4 +877,41 @@ class MinusNova(Layer):
 
     def forward(self, x):
         h = -self.beta * -x
-        return x * (torch.sigmoid(-h) - (1 / (1 + h**2)))
+        return x * (torch.sigmoid(-h) - (1 / (1 + h ** 2)))
+
+
+class TaylorAct(Layer):
+    def __init__(self):
+        super().__init__()
+        self.p = nn.Parameter(torch.tensor([0.1, 1, 2, 1.3]) / 30)
+
+    def forward(self, x):
+        return (self.p[0]
+                + self.p[1] * x
+                + self.p[2] * (x ** 2)
+                + self.p[3] * (x ** 3)
+                )
+
+    def plot(self, bounds=(-4, 4), n_points=200):
+        x = torch.linspace(bounds[0], bounds[1], n_points)
+        with torch.no_grad():
+            y = self.forward(x)
+
+        plt.figure(figsize=(7, 4))
+        plt.plot(x.numpy(), y.numpy(), label='TaylorAct', color='royalblue')
+        plt.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+        plt.axvline(0, color='gray', linewidth=0.8, linestyle='--')
+        plt.title('TaylorAct Activation Function')
+        plt.xlabel('x')
+        plt.ylabel('f(x)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+
+if __name__ == '__main__':
+    act = TaylorAct()
+    act.plot()  # default -4, 4
+    act.plot(bounds=(-1, 1))  # custom bounds
+    act.plot(bounds=(0, 1), n_points=100)

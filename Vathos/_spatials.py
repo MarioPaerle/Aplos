@@ -1436,3 +1436,42 @@ class FFFMultiheadAttentionMixer(Layer):
     def finetune(self):
         self.qk.weight.data.requires_grad = False
         self.out.weight.data.requires_grad = False
+
+
+class NSAttention(Layer):
+    __name__ = "MultiheadAttentionMixer"
+    __complexity__ = "O(L^2 d + L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool = True,
+                 pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm=False):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+
+        self.pos_emb = pos_emb
+        self.kv_cache = None
+        self.qk_norm = qk_norm
+        if self.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qkv = self.qkv(x)
+
+        q, k, v = qkv.chunk(3, dim=-1)
+        kv = k.transpose(-1, -2) @ v
+        return q @ kv.transpose(-1, -2)
