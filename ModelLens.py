@@ -26,7 +26,6 @@ from typing import Optional, Dict, List, Tuple
 # Importiamo transformers per la tokenizzazione
 try:
     import transformers
-
     HAS_TRANSFORMERS = True
 except ImportError:
     HAS_TRANSFORMERS = False
@@ -225,7 +224,7 @@ def _get_ffn_activations(cm, x: torch.Tensor, temp: float) -> Optional[Dict[str,
     try:
         with torch.no_grad():
             pre_act = cm.expand(x)  # [B, L, M]
-            post_act = cm.act(pre_act) if hasattr(cm, "act") else pre_act
+            post_act = cm.activation(pre_act) if hasattr(cm, "activation") else pre_act
 
             # Calcolo della "Concept Attention" con temperatura dinamica
             concept_attn = torch.softmax(pre_act / temp, dim=-1)
@@ -409,6 +408,88 @@ def plot_attention_weights(attn_weights: np.ndarray, tokens: Optional[List[str]]
         axes[h].set_visible(False)
 
     fig.suptitle("Attention Topology Analysis", fontsize=11, color="#A78BFA", y=1.02)
+    fig.tight_layout()
+    return _fig_to_bytes(fig)
+
+
+def plot_activation_distribution(pre_act: np.ndarray, post_act: np.ndarray, act_fn: Optional[nn.Module]) -> bytes:
+    """
+    Traccia la densità (PDF empirica) delle attivazioni prima della non linearità,
+    sovrapposta alla funzione matematica f(x), per diagnosticare le code di distribuzione,
+    i regimi di gating (per SiLU/GeLU) e l'eventuale incidenza di gradienti identici a zero
+    (dead neurons per ReLU o saturazioni). Traccia anche il risultato marginale post-attivazione.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    pre_flat = pre_act.flatten()
+    post_flat = post_act.flatten()
+
+    # ── Subplot 1: Pre-act vs Activation Function ──
+    ax1 = axes[0]
+    ax1_twin = ax1.twinx()
+
+    # Niente clipping: calcoliamo il vero min e max per esporre esplicitamente le code e gli outlier
+    true_min = float(pre_flat.min())
+    true_max = float(pre_flat.max())
+
+    # Assicuriamo un dominio visivo che includa almeno [-5, 5] per contestualizzare la non-linearità,
+    # ma che si estenda fino agli estremi reali per non nascondere anomalie.
+    x_min = min(-5.0, true_min - 1.0)
+    x_max = max(5.0, true_max + 1.0)
+    x_vals = np.linspace(x_min, x_max, 1000)
+
+    # Calcolo della f(x)
+    y_vals = x_vals  # Fallback: funzione lineare/identità
+    if act_fn is not None:
+        try:
+            device = "cpu"
+            # Se la funzione ha parametri apprendibili (es. PReLU), deduciamo il device
+            if hasattr(act_fn, "parameters") and list(act_fn.parameters()):
+                device = next(act_fn.parameters()).device
+            with torch.no_grad():
+                xt = torch.tensor(x_vals, dtype=torch.float32, device=device)
+                yt = act_fn(xt)
+                y_vals = yt.cpu().numpy()
+        except Exception:
+            pass # Se la valutazione fallisce o la topologia non è standard, lasciamo l'identità
+
+    # Plot F(x) map (Matematica dell'attivazione)
+    ax1.plot(x_vals, y_vals, color="#38BDF8", lw=3.0, label="$f(x)$ map", zorder=4)
+    ax1.axvline(0, color="#4B5563", lw=1.5, ls="--", zorder=1)
+    ax1.axhline(0, color="#4B5563", lw=1.5, ls="--", zorder=1)
+
+    # Evidenziamo esplicitamente min e max sull'asse x per identificare istantaneamente leak di range
+    ax1.plot(true_min, 0, marker='v', color='#EF4444', markersize=7, zorder=5)
+    ax1.plot(true_max, 0, marker='v', color='#EF4444', markersize=7, zorder=5)
+    ax1.text(true_min, 0.05, f"Min:\n{true_min:.1f}", color='#EF4444', ha='center', va='bottom', fontsize=8, transform=ax1.get_xaxis_transform())
+    ax1.text(true_max, 0.05, f"Max:\n{true_max:.1f}", color='#EF4444', ha='center', va='bottom', fontsize=8, transform=ax1.get_xaxis_transform())
+
+    ax1.set_xlabel("Pre-activation $x = (X W_{exp})$", fontsize=10)
+    ax1.set_ylabel("Activation Output $f(x)$", color="#38BDF8", fontsize=10)
+    ax1.tick_params(axis='y', labelcolor="#38BDF8")
+
+    # Plot PDF della Pre-attivazione su asse gemello per non schiacciare f(x)
+    ax1_twin.hist(pre_flat, bins=150, range=(x_min, x_max), color="#F472B6", alpha=0.5, density=True, zorder=2)
+    ax1_twin.set_ylabel("Densità Empirica Input $p(x)$", color="#F472B6", fontsize=10)
+    ax1_twin.tick_params(axis='y', labelcolor="#F472B6")
+
+    ax1.set_title("Overlay: Activation $f(x)$ & Input Distribution", color="#A78BFA", fontsize=11)
+    ax1.legend(loc="upper left", fontsize=8)
+
+    # ── Subplot 2: Post-act distribution ──
+    ax2 = axes[1]
+
+    # Per limitare l'effetto di sparse activation estrema (molti zeri) sul binning
+    post_min, post_max = np.percentile(post_flat, [0.0, 99.9])
+
+    ax2.hist(post_flat, bins=120, range=(post_min, max(post_max, 1e-3)), color="#F472B6", alpha=0.6, density=True)
+    ax2.axvline(0, color="#9CA3AF", lw=1, ls="--", alpha=0.5)
+
+    ax2.set_xlabel("Post-activation $Act(X W_{exp})$", fontsize=9)
+    ax2.set_ylabel("Density", fontsize=9)
+    ax2.set_title("Post-Activation Distribution (Sparsity check)", color="#A78BFA", fontsize=10)
+    ax2.grid(True, ls="--", alpha=0.3)
+
     fig.tight_layout()
     return _fig_to_bytes(fig)
 
@@ -931,13 +1012,28 @@ def render_attention_explorer(model):
                                       f"{title} (Primi {display_neurons} neuroni su {mat.shape[1]})",
                                       "Neurons (Hidden Features/Concepts)", "Tokens", cache["tokens"]))
 
+                # ── NEW: Distribuzione Pre/Post Attivazione ──
+                st.markdown("### Analisi del Regime di Saturazione e Geometria dell'Attivazione")
+                st.info(
+                    "Sovrapporre la PDF marginale $p(x)$ dei logits $x = X W_{exp}$ alla mappa non-lineare $f(x)$ "
+                    "permette di diagnosticare il condition number locale della Jacobiana. "
+                    "Un eccesso di massa asintotica può portare ad annullamento del gradiente, mentre (per SiLU/GeLU) "
+                    "masse localizzate sui minimi locali suggeriscono la presenza di strong gating attivi sulla feature."
+                )
+
+                # Cerchiamo di localizzare l'attivazione nel channel mixer per proiettarla matematicamente
+                act_fn = getattr(cm, "activation", None)
+                img_act = plot_activation_distribution(ffn_data["pre_act"], ffn_data["post_act"], act_fn)
+                if img_act:
+                    st.image(img_act)
+
                 # Rendering Spettro SVD
                 if svd_vals is not None:
+                    st.markdown("### Spettro Singolare del Manifold FFN")
                     fig_svd, ax_svd = plt.subplots(figsize=(6, 2.5))
                     ax_svd.plot(svd_vals, color=COLORS[1], linewidth=1.5, marker=".", markersize=3)
                     ax_svd.set_yscale("log")
-                    ax_svd.set_title("Spettro dei Valori Singolari ($\Sigma$) del Manifold", color="#A78BFA",
-                                     fontsize=10)
+                    ax_svd.set_title("Spettro dei Valori Singolari ($\Sigma$)", color="#A78BFA", fontsize=10)
                     ax_svd.set_xlabel("Indice $\sigma_i$", fontsize=8)
                     ax_svd.set_ylabel("Magnitudo (Log Scale)", fontsize=8)
                     ax_svd.grid(True, ls="--", alpha=0.4)
@@ -1046,7 +1142,7 @@ def _render_state_dict_panel(sd: dict, fmt: str, source_name: str):
 
     st.markdown("**Per-layer dims** (inferred from weight shapes)")
     import pandas as pd
-    rows = [{"layer": i, "d_model": d, "M_dim (FFN)": m} for i, (d, m) in
+    rows = [{"layer": i, "d_model": d, "M_dim (FFN)": m, "Spatial Mixer": cfg.get("spatial_type", "?")} for i, (d, m) in
             enumerate(zip(cfg["d_models"], cfg["M_dims"]))]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -1065,17 +1161,16 @@ def _build_default_snippet(cfg: dict) -> str:
     ms = cfg["M_dims"]
     d_str = "[" + ", ".join(str(x) for x in ds) + "]"
     m_str = "[" + ", ".join(str(x) for x in ms) + "]"
-    stype = cfg.get("spatial_type", "MultiheadAttentionMixer")
+    stype = cfg.get("spatial_mixer", "MultiheadAttentionMixer")
     if "NOV" in stype:
-        spatial_import, spatial_class = "MultiheadAttentionMixerNOV", "MultiheadAttentionMixerNOV"
+        spatial_import, spatial_class = "MultiheadAttentionMixerNOV", "MultiheadAttentionMixerNOV", "MultiheadAttentionMixer"
     else:
         spatial_import, spatial_class = "GroupedQueryAttention", "GroupedQueryAttention"
-
+    spatial_import = spatial_class = stype
     return f"""import sys
 # sys.path.insert(0, "/path/to/your/project")  # uncomment if needed
-from Vathos.blocks import ModdedFormer, Builder, {spatial_import}, RMSNorm
-
-spatials = [Builder({spatial_class}, n_heads=4, n_kv_heads=2)] * {n}
+from Vathos.blocks import *
+spatials = [Builder({spatial_class}, n_heads=8)] * {n}
 skips    = [None] * {n}
 
 model = ModdedFormer(

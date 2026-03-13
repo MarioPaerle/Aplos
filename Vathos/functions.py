@@ -336,11 +336,12 @@ def zero_layer_mtp_loss( # TODO: Vibecoded for now
     2. Uses index gathering for target logits to minimize memory bandwidth.
     3. Casts to FP32 for numerical stability before reduction.
     """
+    assert sum(mtp_weights) == 1, "the sum of MTP weights must be 1.0"
 
     if softcap_val > 0.0:
         logits = softcap_val * torch.tanh(logits / softcap_val)
 
-    lse = torch.logsumexp(logits.float(), dim=-1)
+    lse = torch.logsumexp(logits, dim=-1).float()
 
     total_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
@@ -375,11 +376,6 @@ def zero_layer_mtp_loss( # TODO: Vibecoded for now
         total_loss += w * loss_k
 
     return total_loss
-
-
-import torch
-import matplotlib.pyplot as plt
-import numpy as np
 
 
 def plot_tensor_diagnostics(

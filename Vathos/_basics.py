@@ -472,6 +472,20 @@ class ReLU2(Layer):
         return x_pos * x_pos
 
 
+class GeLU2(Layer):
+    gated = False
+    __name__ = "GeLU^2"
+    __complexity__ = "O(L)"
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = x/5
+        x_pos = F.sigmoid(z)*(z)
+        return x_pos * x_pos
+
+
 class LeLU2(Layer):
     gated = False
     __name__ = "ReLU^2"
@@ -880,17 +894,18 @@ class MinusNova(Layer):
         return x * (torch.sigmoid(-h) - (1 / (1 + h ** 2)))
 
 
-class TaylorAct(Layer):
-    def __init__(self):
+class TaylorAct(nn.Module):
+    def __init__(self, order=3):
         super().__init__()
-        self.p = nn.Parameter(torch.tensor([0.1, 1, 2, 1.3]) / 30)
+        self.order = order
+        self.coeffs = nn.Parameter(torch.randn(order + 1) * 0.02)
 
     def forward(self, x):
-        return (self.p[0]
-                + self.p[1] * x
-                + self.p[2] * (x ** 2)
-                + self.p[3] * (x ** 3)
-                )
+        device = x.device
+        exponents = torch.arange(self.order + 1, device=device, dtype=x.dtype)
+        x_pow = x.unsqueeze(-1).pow(exponents)
+
+        return torch.matmul(x_pow, self.coeffs)
 
     def plot(self, bounds=(-4, 4), n_points=200):
         x = torch.linspace(bounds[0], bounds[1], n_points)
