@@ -472,16 +472,17 @@ class ReLU2(Layer):
         return x_pos * x_pos
 
 
-class SiLU2(Layer):
+class PSiLU2(Layer):
     gated = False
     __name__ = "SiLU^2"
     __complexity__ = "O(L)"
 
     def __init__(self):
         super().__init__()
+        self.param = nn.Parameter(torch.tensor([5, 2]), requires_grad=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_pos = F.silu(x/10)
+        x_pos = self.param[0]*F.silu(x/self.param[1])
         return x_pos * x_pos
 
 
