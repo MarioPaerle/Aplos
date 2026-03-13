@@ -472,17 +472,16 @@ class ReLU2(Layer):
         return x_pos * x_pos
 
 
-class GeLU2(Layer):
+class SiLU2(Layer):
     gated = False
-    __name__ = "GeLU^2"
+    __name__ = "SiLU^2"
     __complexity__ = "O(L)"
 
     def __init__(self):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = x/5
-        x_pos = F.sigmoid(z)*(z)
+        x_pos = F.silu(x/10)
         return x_pos * x_pos
 
 

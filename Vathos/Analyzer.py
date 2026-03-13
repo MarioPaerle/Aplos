@@ -1,3 +1,37 @@
+"""
+Vathos ModdedFormer Analyzer API
+=================================
+A pure-Python/Jupyter alternative to the Streamlit inspector.
+Designed for rigorous, programmatic topological and statistical inspection
+of Transformer parameters, gradients, and activation manifolds.
+
+Usage in a Jupyter Notebook:
+----------------------------
+    import torch
+    from vathos_analyzer import VathosAnalyzer
+
+    # 1. Initialize
+    analyzer = VathosAnalyzer(model)
+
+    # 2. Plot Architecture Overview & Parameter distributions
+    analyzer.plot_overview()
+    analyzer.plot_weight_distributions(layer_idx=0, component="both")
+
+    # 3. Manifold Extraction via Forward Hooks
+    x = torch.randint(0, model.vocab_size, (1, 64))
+    analyzer.capture_forward(x) # Installs hooks, runs forward, saves state
+
+    # 4. Explore Layer Topology (Attention & FFN mapping f(x))
+    analyzer.plot_attention_weights(layer_idx=0)
+    analyzer.plot_ffn_manifold(layer_idx=0)
+
+    # 5. Training History
+    analyzer.plot_training_history()
+
+    # --- OR USE THE ONE-LINER MACRO ---
+    # from vathos_analyzer import study
+    # analyzer = study(model)
+"""
 
 import math
 import numpy as np
@@ -9,6 +43,7 @@ from typing import Optional, Dict, List, Union
 try:
     from IPython.display import display
     import pandas as pd
+
     HAS_IPYTHON = True
 except ImportError:
     HAS_IPYTHON = False
@@ -32,8 +67,10 @@ DARK_THEME = {
 COLORS = ["#A78BFA", "#60A5FA", "#34D399", "#F472B6", "#FB923C",
           "#FBBF24", "#38BDF8", "#A3E635", "#E879F9", "#F87171"]
 
+
 def apply_theme():
     plt.rcParams.update(DARK_THEME)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  CORE ANALYZER CLASS
@@ -165,7 +202,9 @@ class VathosAnalyzer:
             def make_spatial_hook(layer_idx):
                 def hook(m, inp):
                     self.captured_activations[layer_idx]["spatial_in"] = inp[0].detach()
+
                 return hook
+
             handles.append(block.spatial_mixer.register_forward_pre_hook(make_spatial_hook(i)))
 
             cm = block.channel_mixer
@@ -175,11 +214,13 @@ class VathosAnalyzer:
                 def make_expand_hook(layer_idx):
                     def hook(m, inp, out):
                         self.captured_activations[layer_idx]["channel_pre_act"] = out.detach()
+
                     return hook
 
                 def make_contract_hook(layer_idx):
                     def hook(m, inp):
                         self.captured_activations[layer_idx]["channel_post_act"] = inp[0].detach()
+
                     return hook
 
                 handles.append(cm.expand.register_forward_hook(make_expand_hook(i)))
@@ -189,7 +230,9 @@ class VathosAnalyzer:
                 def make_cm_hook(layer_idx):
                     def hook(m, inp):
                         self.captured_activations[layer_idx]["channel_in"] = inp[0].detach()
+
                     return hook
+
                 handles.append(cm.register_forward_pre_hook(make_cm_hook(i)))
 
         # Run forward pass
@@ -249,11 +292,13 @@ class VathosAnalyzer:
             vals = [lambdas[k] for k in keys]
             bars = ax2.bar(range(len(keys)), vals, color=COLORS[:len(keys)], alpha=0.85)
             ax2.set_xticks(range(len(keys)))
-            ax2.set_xticklabels([k.replace("route_", "").replace("_to_", "→") for k in keys], rotation=30, ha="right", fontsize=8)
+            ax2.set_xticklabels([k.replace("route_", "").replace("_to_", "→") for k in keys], rotation=30, ha="right",
+                                fontsize=8)
             ax2.axhline(0, color="#9CA3AF", linewidth=0.8, ls="--")
             ax2.set_title("Skip-connection Gate Values (λ)", color="#A78BFA")
             for bar, v in zip(bars, vals):
-                ax2.text(bar.get_x() + bar.get_width() / 2, v + 0.003, f"{v:.4f}", ha="center", va="bottom", fontsize=8, color="#D8D8F0")
+                ax2.text(bar.get_x() + bar.get_width() / 2, v + 0.003, f"{v:.4f}", ha="center", va="bottom", fontsize=8,
+                         color="#D8D8F0")
             fig2.tight_layout()
             self.show_fig(fig2)
 
@@ -289,7 +334,8 @@ class VathosAnalyzer:
             for r in rows:
                 print(r)
 
-    def plot_weight_distributions(self, layer_idx: int, component: str = "both", plot_gradients: bool = False, bins: int = 80):
+    def plot_weight_distributions(self, layer_idx: int, component: str = "both", plot_gradients: bool = False,
+                                  bins: int = 80):
         params = self.get_layer_params(layer_idx, component)
         if plot_gradients:
             params = {k: v.grad for k, v in params.items() if v.grad is not None}
@@ -302,8 +348,10 @@ class VathosAnalyzer:
         cols = min(n, 3)
         rows = math.ceil(n / cols)
         fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 3.5 * rows))
-        if n == 1: axes = np.array([[axes]])
-        elif rows == 1: axes = axes.reshape(1, -1)
+        if n == 1:
+            axes = np.array([[axes]])
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
 
         for idx, (name, t) in enumerate(params.items()):
             ax = axes[idx // cols][idx % cols]
@@ -316,11 +364,13 @@ class VathosAnalyzer:
         for idx in range(n, rows * cols):
             axes[idx // cols][idx % cols].set_visible(False)
 
-        fig.suptitle(f"Layer {layer_idx} - {'Gradient' if plot_gradients else 'Weight'} Distributions", color="#A78BFA", fontsize=12)
+        fig.suptitle(f"Layer {layer_idx} - {'Gradient' if plot_gradients else 'Weight'} Distributions", color="#A78BFA",
+                     fontsize=12)
         fig.tight_layout()
         self.show_fig(fig)
 
-    def plot_svd_spectrum(self, layer_idx: int, component: str = "both", plot_gradients: bool = False, log_scale: bool = True):
+    def plot_svd_spectrum(self, layer_idx: int, component: str = "both", plot_gradients: bool = False,
+                          log_scale: bool = True):
         params = self.get_layer_params(layer_idx, component)
         if plot_gradients:
             params = {k: v.grad for k, v in params.items() if v.grad is not None}
@@ -334,8 +384,10 @@ class VathosAnalyzer:
         cols = min(n, 3)
         rows = math.ceil(n / cols)
         fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 3.5 * rows))
-        if n == 1: axes = np.array([[axes]])
-        elif rows == 1: axes = axes.reshape(1, -1)
+        if n == 1:
+            axes = np.array([[axes]])
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
 
         for idx, (name, t) in enumerate(eligible.items()):
             ax = axes[idx // cols][idx % cols]
@@ -495,8 +547,10 @@ class VathosAnalyzer:
         # Min / Max assoluti (Individuazione leak instabili)
         ax1.plot(true_min, 0, marker='v', color='#EF4444', markersize=7, zorder=5)
         ax1.plot(true_max, 0, marker='v', color='#EF4444', markersize=7, zorder=5)
-        ax1.text(true_min, 0.05, f"Min:\n{true_min:.1f}", color='#EF4444', ha='center', va='bottom', fontsize=9, transform=ax1.get_xaxis_transform())
-        ax1.text(true_max, 0.05, f"Max:\n{true_max:.1f}", color='#EF4444', ha='center', va='bottom', fontsize=9, transform=ax1.get_xaxis_transform())
+        ax1.text(true_min, 0.05, f"Min:\n{true_min:.1f}", color='#EF4444', ha='center', va='bottom', fontsize=9,
+                 transform=ax1.get_xaxis_transform())
+        ax1.text(true_max, 0.05, f"Max:\n{true_max:.1f}", color='#EF4444', ha='center', va='bottom', fontsize=9,
+                 transform=ax1.get_xaxis_transform())
 
         ax1.set_xlabel("Pre-activation $x = (X W_{exp})$", fontsize=10)
         ax1.set_ylabel("Activation Output $f(x)$", color="#38BDF8", fontsize=10)
@@ -536,7 +590,8 @@ class VathosAnalyzer:
             return
 
         print("=== 📈 Training History ===")
-        print(f"Steps: {getattr(self.model, 'steps', '-')} | Epochs: {getattr(self.model, 'epochs', '-')} | Best Loss: {getattr(self.model, 'best_loss', '-')}")
+        print(
+            f"Steps: {getattr(self.model, 'steps', '-')} | Epochs: {getattr(self.model, 'epochs', '-')} | Best Loss: {getattr(self.model, 'best_loss', '-')}")
 
         if losses_dict or losses_ep:
             fig, ax = plt.subplots(figsize=(10, 4))
@@ -547,8 +602,8 @@ class VathosAnalyzer:
                 # Smooth curve
                 if len(ys) > 10:
                     win = max(2, len(ys) // 20)
-                    ys_sm = np.convolve(ys, np.ones(win)/win, mode="valid")
-                    ax.plot(xs[win-1:], ys_sm, color="#4c9be8", linewidth=1.5, label=f"Smoothed (w={win})")
+                    ys_sm = np.convolve(ys, np.ones(win) / win, mode="valid")
+                    ax.plot(xs[win - 1:], ys_sm, color="#4c9be8", linewidth=1.5, label=f"Smoothed (w={win})")
 
             if losses_ep:
                 ex = list(losses_ep.keys())
@@ -567,7 +622,8 @@ class VathosAnalyzer:
         for t_idx, (m_name, m_vals) in enumerate(metrics_ep.items()):
             fig, ax = plt.subplots(figsize=(10, 3.5))
             col = COLORS[t_idx % len(COLORS)]
-            ax.plot(range(len(m_vals)), m_vals, color=col, linewidth=2.2, marker="o", markersize=5, label=f"{m_name} per epoch")
+            ax.plot(range(len(m_vals)), m_vals, color=col, linewidth=2.2, marker="o", markersize=5,
+                    label=f"{m_name} per epoch")
             ax.set_title(f"Metric: {m_name}", color="#A78BFA")
             ax.set_xlabel("Epochs")
             ax.set_ylabel(m_name)
@@ -581,7 +637,7 @@ class VathosAnalyzer:
         Esegue un'analisi topologica e statistica completa, chiamando in sequenza
         tutte le routine grafiche. Genera un referto end-to-end del modello.
         """
-        print(f"\n{'='*70}\n🔬 INITIATING FULL TOPOLOGICAL ANALYSIS (Focus Layer {layer_idx})\n{'='*70}")
+        print(f"\n{'=' * 70}\n🔬 INITIATING FULL TOPOLOGICAL ANALYSIS (Focus Layer {layer_idx})\n{'=' * 70}")
         self.plot_overview()
 
         print(f"\n[1/4] Weight Distributions (Layer {layer_idx})")
@@ -602,14 +658,15 @@ class VathosAnalyzer:
 
         print("\n--- Training History ---")
         self.plot_training_history()
-        print(f"\n{'='*70}\n✅ ANALYSIS COMPLETE\n{'='*70}")
+        print(f"\n{'=' * 70}\n✅ ANALYSIS COMPLETE\n{'=' * 70}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  TOP-LEVEL MACRO
 # ──────────────────────────────────────────────────────────────────────────────
 
-def study(model: nn.Module, layer_idx: int = 0, dummy_seq_len: int = 64, device: Optional[Union[str, torch.device]] = None) -> VathosAnalyzer:
+def study(model: nn.Module, layer_idx: int = 0, dummy_seq_len: int = 64,
+          device: Optional[Union[str, torch.device]] = None) -> VathosAnalyzer:
     """
     Macro globale per profilare immediatamente un modello in un Notebook o script nudo.
     1. Assicura il corretto posizionamento e deduce il device dei tensori.
