@@ -172,6 +172,7 @@ class YaRN(Layer):
 
 class NanoYaRN(Layer):
     """Modded Nano-Gpt implmenetation of YaRN"""
+
     def __init__(self, head_dim, max_seq_len, paired=False):
         super().__init__()
         self.head_dim = head_dim
@@ -189,11 +190,11 @@ class NanoYaRN(Layer):
         return factor1 * x_BTHD + factor2 * x_flip
 
     def reset(self):
-        angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=self.head_dim//4, dtype=torch.float32)
+        angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=self.head_dim // 4, dtype=torch.float32)
         angular_freq = angular_freq.repeat_interleave(2)
         # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
-        angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(self.head_dim//2)])
-        t = torch.arange(2*self.max_seq_len, dtype=torch.float32)
+        angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(self.head_dim // 2)])
+        t = torch.arange(2 * self.max_seq_len, dtype=torch.float32)
         if not self.paired:
             theta = torch.outer(t, angular_freq)
             self.factor1 = nn.Buffer(
@@ -220,12 +221,12 @@ class NanoYaRN(Layer):
         # start with 0.1, inspired by 0.12 from @leloykun and learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.1
 
-    def apply(self, old_window: int, new_window: int, alpha: int=1, beta: int=32):
+    def apply(self, old_window: int, new_window: int, alpha: int = 1, beta: int = 32):
         rotations = old_window * self.angular_freq / (2 * torch.pi)
         scaling_factor = old_window / new_window
         interpolation_weight = torch.clamp((rotations - alpha) / (beta - alpha), 0, 1)
         self.angular_freq *= scaling_factor + interpolation_weight * (1 - scaling_factor)
-        t = torch.arange(2*self.max_seq_len, dtype=torch.float32, device=self.angular_freq.device)
+        t = torch.arange(2 * self.max_seq_len, dtype=torch.float32, device=self.angular_freq.device)
         if not self.paired:
             theta = torch.outer(t, self.angular_freq)
             self.factor1.copy_(theta.cos())
@@ -271,7 +272,10 @@ class MultiheadAttentionMixer(Layer):
         nn.init.xavier_uniform_(self.qkv.weight)
         nn.init.xavier_uniform_(self.out.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, ve=None) -> torch.Tensor:
+        """
+        ve: Stands for value embeddings, which should be already weighted byt the caller, of course the dimension must match x
+        """
         B, L, D = x.shape
 
         qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
@@ -284,7 +288,8 @@ class MultiheadAttentionMixer(Layer):
 
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=0)
-
+        if ve is not None:
+            v = v + ve
         attn = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=self.causal,

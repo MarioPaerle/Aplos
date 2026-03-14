@@ -24,8 +24,12 @@ class Block1d(Layer):
         self.norm1 = norm(spatial_mixer.d_model)
         self.norm2 = norm(spatial_mixer.d_model)
 
-    def forward(self, x: torch.Tensor):
-        x = x + self.spatial_mixer(self.norm1(x))
+    def forward(self, x: torch.Tensor, ve=None):
+        if ve is not None:
+            x = x + self.spatial_mixer(self.norm1(x), ve)
+        else:
+            x = x + self.spatial_mixer(self.norm1(x))
+
         x = x + self.channel_mixer(self.norm2(x))
         return x
 
@@ -53,38 +57,23 @@ class CBlock1d(Layer):
         self.norm2 = norm(spatial_mixer.d_model)
         self.l = nn.Parameter(torch.tensor([1.0, 1.0, 1.0, 1.0]))
 
-    def forward(self, x: torch.Tensor):
-        x = x * self.l[0] + self.spatial_mixer(self.norm1(x)) * self.l[1]
+    def forward(self, x: torch.Tensor, ve=None):
+        if ve is not None:
+            x = x * self.l[0] + self.spatial_mixer(self.norm1(x), ve) * self.l[1]
+        else:
+            x = x * self.l[0] + self.spatial_mixer(self.norm1(x)) * self.l[1]
         x = x * self.l[2] + self.channel_mixer(self.norm2(x)) * self.l[3]
         return x
 
     def generate(self, x: torch.Tensor):
-        # Use generate if available, otherwise forward
         if self.spatial_mixer.has_custom_generate():
             x = x + self.spatial_mixer.generate(self.norm1(x))
         else:
             x = x + self.spatial_mixer(self.norm1(x))
-
         if self.channel_mixer.has_custom_generate():
             x = x + self.channel_mixer.generate(self.norm2(x))
         else:
             x = x + self.channel_mixer(self.norm2(x))
-
-        return x
-
-
-    def generate(self, x: torch.Tensor):
-        # Use generate if available, otherwise forward
-        if self.spatial_mixer.has_custom_generate():
-            x = x + self.spatial_mixer.generate(self.norm1(x))
-        else:
-            x = x + self.spatial_mixer(self.norm1(x))
-
-        if self.channel_mixer.has_custom_generate():
-            x = x + self.channel_mixer.generate(self.norm2(x))
-        else:
-            x = x + self.channel_mixer(self.norm2(x))
-
         return x
 
 
@@ -122,26 +111,18 @@ class JBlock1d(Layer):
         super().__init__()
         self.channel_mixer = channel_mixer
         self.spatial_mixer = spatial_mixer
-
         self.norm = norm(d_model)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, ve=None):
         h = self.norm(x)
+        if ve is not None:
+            return x + self.spatial_mixer(h, ve) + self.channel_mixer(h)
         return x + self.spatial_mixer(h) + self.channel_mixer(h)
 
     def generate(self, x: torch.Tensor):
         h = self.norm(x)
-
-        if hasattr(self.spatial_mixer, 'has_custom_generate') and self.spatial_mixer.has_custom_generate():
-            spatial_out = self.spatial_mixer.generate(h)
-        else:
-            spatial_out = self.spatial_mixer(h)
-
-        if hasattr(self.channel_mixer, 'has_custom_generate') and self.channel_mixer.has_custom_generate():
-            channel_out = self.channel_mixer.generate(h)
-        else:
-            channel_out = self.channel_mixer(h)
-
+        spatial_out = self.spatial_mixer.generate(h) if (hasattr(self.spatial_mixer, 'has_custom_generate') and self.spatial_mixer.has_custom_generate()) else self.spatial_mixer(h)
+        channel_out = self.channel_mixer.generate(h) if (hasattr(self.channel_mixer, 'has_custom_generate') and self.channel_mixer.has_custom_generate()) else self.channel_mixer(h)
         return x + spatial_out + channel_out
 
 
@@ -1174,11 +1155,12 @@ class ModdedFormer(VathosModel):
                  M_dims: List[int] | None = None, weights_tying=True,
                  baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False,
                  UDLP=VariableUDLP,
-                 skips: List[int | None] | None = None):
+                 skips: List[int | None] | None = None, value_embeddings: List[int | None] | None = None,
+                 ve_type: str = 'scalar', ve_gate_dim: int | None = None):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
-        assert d_models[0] == embed_dim, "embed_dim must equal first layer dimension"
+        assert d_models[0] == embed_dim
         assert max(d_models) == min(d_models), "Variables d_models is WIP and not working"
         self.d_models = d_models
         n_layers = self.n_layer = len(d_models)
@@ -1197,17 +1179,17 @@ class ModdedFormer(VathosModel):
         self.zeroskip = zeroskip
 
         self.skips = skips if skips is not None else [None] * n_layers
-        assert len(self.skips) == n_layers, "Skip lists length must equal n_layers"
+        assert len(self.skips) == n_layers
 
         self.skip_lambdas = nn.ParameterDict()
         for source_idx, target_idx in enumerate(self.skips):
             if target_idx is not None:
-                assert target_idx > source_idx, f"Skip {source_idx}->{target_idx} will result in non-causal modeling"
-                assert target_idx < n_layers, f"Skip {target_idx} points at layer {source_idx} but model has only {n_layers} layers"
+                assert target_idx > source_idx
+                assert target_idx < n_layers
                 self.skip_lambdas[f"route_{source_idx}_to_{target_idx}"] = nn.Parameter(torch.zeros(1))
 
         if weights_tying:
-            assert d_models[-1] == embed_dim, "embed_dim must be equal to last hidden dim for weight_tying"
+            assert d_models[-1] == embed_dim
             self.unembedder.linear.weight = self.embedder.embedding.weight
 
         blocks = []
@@ -1223,29 +1205,70 @@ class ModdedFormer(VathosModel):
                 ))
 
         self.blocks = nn.ModuleList(blocks)
+
         if zeroskip:
             self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensor([0.0])) for _ in range(n_layers)])
+
+        # Value Embeddings
+        assert ve_type in ('scalar', 'gate'), f"ve_type must be 'scalar' or 'gate', got {ve_type}"
+        self.ve_type = ve_type
+        self.ve_gate_dim = ve_gate_dim if ve_gate_dim is not None else embed_dim
+        self.value_embeddings_cfg = value_embeddings
+
+        if value_embeddings is not None:
+            assert len(value_embeddings) == n_layers, "value_embeddings length must equal n_layers"
+            unique_groups = sorted(set(v for v in value_embeddings if v is not None))
+            self.ve_embeddings = nn.ModuleDict({
+                str(g): nn.Embedding(vocab_size, embed_dim)
+                for g in unique_groups
+            })
+            # Per-layer ve weights — only allocated for layers that actually use ve
+            if ve_type == 'scalar':
+                self.ve_scales = nn.ParameterDict({
+                    str(i): nn.Parameter(torch.ones(1))
+                    for i, v in enumerate(value_embeddings) if v is not None
+                })
+            else:  # gate
+                self.ve_gates = nn.ModuleDict({
+                    str(i): nn.Linear(self.ve_gate_dim, embed_dim, bias=False)
+                    for i, v in enumerate(value_embeddings) if v is not None
+                })
+        else:
+            self.ve_embeddings = nn.ModuleDict()
 
         self.final_norm = RMSNorm(d_models[-1])
         self._init_weights()
 
+    def _apply_ve_weight(self, ve: torch.Tensor, x: torch.Tensor, layer_idx: int) -> torch.Tensor:
+        if self.ve_type == 'scalar':
+            return ve * self.ve_scales[str(layer_idx)]
+        else:  # gate: nanogpt-style, 2*sigmoid(linear(x)) elementwise on ve
+            gate = 2.0 * torch.sigmoid(self.ve_gates[str(layer_idx)](x[..., :self.ve_gate_dim]))
+            return ve * gate
+
     def forward(self, x):
+        input_ids = x
         x0 = self.embedder(x)
         x = x0
 
         active_skips = {}
 
         for i, block in enumerate(self.blocks):
+            ve = None
+            if self.value_embeddings_cfg is not None and self.value_embeddings_cfg[i] is not None:
+                group_id = self.value_embeddings_cfg[i]
+                ve = self.ve_embeddings[str(group_id)](input_ids)
+                ve = self._apply_ve_weight(ve, x, i)
+
             if self.zeroskip:
-                x = block(x) + x0 * self.zeroskip_params[i]
+                x = block(x, ve=ve) + x0 * self.zeroskip_params[i]
             else:
-                x = block(x)
+                x = block(x, ve=ve)
 
             for source_idx, target_idx in enumerate(self.skips):
                 if target_idx == i:
                     gate = self.skip_lambdas[f"route_{source_idx}_to_{target_idx}"]
                     x = x + gate * active_skips[source_idx]
-
                     del active_skips[source_idx]
 
             if self.skips[i] is not None:
@@ -1253,43 +1276,6 @@ class ModdedFormer(VathosModel):
 
         x = self.unembedder(self.final_norm(x))
         return x
-
-    def _init_weights(self):
-        std_embed = 0.02
-        try:
-            nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
-        except:
-            pass
-        try:
-            nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
-        except:
-            pass
-
-        for block_idx, block in enumerate(self.blocks):
-            block.channel_mixer._init_weights()
-            try:
-                block.spatial_mixer._init_weights()
-            except:
-                pass
-
-    def summary(self):
-        print(f"Vathos {NUM}ModdedFormer{RES} Summary")
-        print(f"Embedding dim: {self.embed_dim}")
-        print(f"Skips: {self.skips}")
-        for i in range(self.n_layer):
-            if i == 0:
-                in_dim = self.embed_dim
-            else:
-                in_dim = self.d_models[i - 1]
-            out_dim = self.d_models[i]
-            M = self.M_dims[i]
-            print(f"Layer {i}: {in_dim} -> {out_dim}")
-            print(f"Block: {i}: {self.blocks[i]}")
-            print(f"\tFFN Dimension: {M}")
-            print(f"\tFFN Activation: {self.blocks[i].channel_mixer.activation}")
-
-        print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
-        print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
 
 
 #######################################################################################################################

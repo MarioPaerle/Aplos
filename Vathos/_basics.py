@@ -479,7 +479,7 @@ class PSiLU2(Layer):
 
     def __init__(self):
         super().__init__()
-        self.param = nn.Parameter(torch.tensor([5, 2]), requires_grad=True)
+        self.param = nn.Parameter(torch.tensor([5.0, 2.0]), requires_grad=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_pos = self.param[0]*F.silu(x/self.param[1])
