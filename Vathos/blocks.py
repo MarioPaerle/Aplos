@@ -1277,6 +1277,43 @@ class ModdedFormer(VathosModel):
         x = self.unembedder(self.final_norm(x))
         return x
 
+    def _init_weights(self):
+        std_embed = 0.02
+        try:
+            nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
+        except:
+            pass
+        try:
+            nn.init.normal_(self.unembedder.weight, mean=0.0, std=std_embed)
+        except:
+            pass
+
+        for block_idx, block in enumerate(self.blocks):
+            block.channel_mixer._init_weights()
+            try:
+                block.spatial_mixer._init_weights()
+            except:
+                pass
+
+    def summary(self):
+        print(f"Vathos {NUM}ModdedFormer{RES} Summary")
+        print(f"Embedding dim: {self.embed_dim}")
+        print(f"Skips: {self.skips}")
+        for i in range(self.n_layer):
+            if i == 0:
+                in_dim = self.embed_dim
+            else:
+                in_dim = self.d_models[i - 1]
+            out_dim = self.d_models[i]
+            M = self.M_dims[i]
+            print(f"Layer {i}: {in_dim} -> {out_dim}")
+            print(f"Block: {i}: {self.blocks[i]}")
+            print(f"\tFFN Dimension: {M}")
+            print(f"\tFFN Activation: {self.blocks[i].channel_mixer.activation}")
+
+        print(f"Num Parameters: {NUM}{sum([p.numel() for p in self.parameters()]):_}{RES}")
+        print(f"Num Trainable Parameters: {NUM}{sum([p.numel() for p in self.parameters() if p.requires_grad]):_}{RES}")
+
 
 #######################################################################################################################
 
