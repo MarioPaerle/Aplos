@@ -362,6 +362,140 @@ class MultiheadAttentionMixer(Layer):
         self.out.weight.requires_grad = False
 
 
+class MultiheadAttentionMixerXSA(Layer):
+    __name__ = "MultiheadAttentionMixerXSA"
+    __complexity__ = "O(L^2 d + L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool = True,
+                 pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm=False):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+        self.pos_emb = pos_emb
+        self.kv_cache = None
+        self.qk_norm = qk_norm
+        if self.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+
+    def forward(self, x: torch.Tensor, ve=None) -> torch.Tensor:
+        """
+        ve: Stands for value embeddings, which should be already weighted by the caller, of course the dimension must match x
+        """
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+        if ve is not None:
+            v = v + ve
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=self.causal,
+            dropout_p=self.dropout_p if self.training else 0.0,
+        )
+
+        v_norm = F.normalize(v, dim=-1)
+        attn = attn - (attn * v_norm).sum(dim=-1, keepdim=True) * v_norm
+
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def show_weights_forward(self, x):
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+
+        scale = 1.0 / math.sqrt(self.head_dim)
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+        if self.causal:
+            mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=x.device), diagonal=1)
+            scores.masked_fill_(mask, float('-inf'))
+
+        attn_weights = F.softmax(scores, dim=-1)
+        attn = torch.matmul(attn_weights, v)
+
+        v_norm = F.normalize(v, dim=-1)
+        attn = attn - (attn * v_norm).sum(dim=-1, keepdim=True) * v_norm
+
+        out = self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+        return out, attn_weights
+
+    def generate(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=pos_offset)
+
+        v_self = v
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+
+        self.kv_cache = (k, v)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=self.causal and (L > 1),
+            dropout_p=0.0,
+        )
+
+        v_norm = F.normalize(v_self, dim=-1)
+        attn = attn - (attn * v_norm).sum(dim=-1, keepdim=True) * v_norm
+
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+    def finetune(self):
+        self.qkv.weight.requires_grad = False
+        self.out.weight.requires_grad = False
+
+
 class MultiheadAttentionMixerNOV(Layer):
     __name__ = "MultiheadAttentionMixerNOV"
     __complexity__ = "O(L^2 d + L d^2)"
