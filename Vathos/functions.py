@@ -430,3 +430,61 @@ def plot_tensor_diagnostics(
 
     plt.tight_layout()
     plt.show()
+
+
+import math
+
+def compute_normalized_grad_norm(model: torch.nn.Module) -> float:
+    """
+    Returns the RMS gradient norm across all trainable parameters.
+
+    RMS = sqrt( sum(g_i^2) / N )   where N = total number of scalar gradients.
+
+    Because this *averages* rather than sums, the result is independent of
+    model size: a 1 M-param and a 100 M-param model both live in [0, ~1]
+    during healthy training, making cross-run comparisons meaningful.
+
+    Returns 0.0 if no gradients are present yet.
+    """
+    total_sq = 0.0
+    total_n  = 0
+
+    for p in model.parameters():
+        if p.grad is not None:
+            total_sq += p.grad.detach().float().pow(2).sum().item()
+            total_n  += p.grad.numel()
+
+    if total_n == 0:
+        return 0.0
+
+    return math.sqrt(total_sq / total_n)
+
+
+def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
+    """
+    Returns a dict { layer_name -> RMS grad norm } for every named module
+    that owns at least one parameter with a gradient.
+
+    Same RMS normalisation as compute_normalized_grad_norm so per-layer
+    values are still comparable across models of different sizes.
+    Leaf modules only (skips container modules to avoid double-counting).
+    """
+    norms = {}
+
+    for name, module in model.named_modules():
+        # only leaf modules that directly own parameters
+        own_params = list(module.parameters(recurse=False))
+        if not own_params:
+            continue
+
+        sq_sum = 0.0
+        n      = 0
+        for p in own_params:
+            if p.grad is not None:
+                sq_sum += p.grad.detach().float().pow(2).sum().item()
+                n      += p.grad.numel()
+
+        if n > 0:
+            norms[name] = math.sqrt(sq_sum / n)
+
+    return norms

@@ -289,7 +289,8 @@ class MultiheadAttentionMixer(Layer):
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=0)
         if ve is not None:
-            v = v + ve
+            v = v + ve.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
         attn = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=self.causal,

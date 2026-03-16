@@ -482,7 +482,7 @@ class PSiLU2(Layer):
         self.param = nn.Parameter(torch.tensor([5.0, 2.0]), requires_grad=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_pos = self.param[0]*F.silu(x/self.param[1])
+        x_pos = self.param[0] * F.silu(x / self.param[1])
         return x_pos * x_pos
 
 
@@ -923,6 +923,18 @@ class TaylorAct(nn.Module):
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.show()
+
+
+class FastPoly3(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.a0 = nn.Parameter(torch.zeros(channels))
+        self.a1 = nn.Parameter(torch.ones(channels))
+        self.a2 = nn.Parameter(torch.zeros(channels))
+        self.a3 = nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.a0 + x * (self.a1 + x * (self.a2 + x * self.a3))
 
 
 if __name__ == '__main__':
