@@ -1209,7 +1209,6 @@ class ModdedFormer(VathosModel):
         if zeroskip:
             self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensor([0.0])) for _ in range(n_layers)])
 
-        # Value Embeddings
         assert ve_type in ('scalar', 'gate'), f"ve_type must be 'scalar' or 'gate', got {ve_type}"
         self.ve_type = ve_type
         self.ve_gate_dim = ve_gate_dim if ve_gate_dim is not None else embed_dim
@@ -1222,10 +1221,9 @@ class ModdedFormer(VathosModel):
                 str(g): nn.Embedding(vocab_size, embed_dim)
                 for g in unique_groups
             })
-            # Per-layer ve weights — only allocated for layers that actually use ve
             if ve_type == 'scalar':
                 self.ve_scales = nn.ParameterDict({
-                    str(i): nn.Parameter(torch.ones(1))
+                    str(i): nn.Parameter(torch.zeros(1))
                     for i, v in enumerate(value_embeddings) if v is not None
                 })
             else:  # gate

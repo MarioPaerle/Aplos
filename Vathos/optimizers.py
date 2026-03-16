@@ -37,182 +37,482 @@ class ValueScheduler:
         return self.values[step]
 
 
-class StochasticMuonWithAuxAdam(Optimizer):
-    def __init__(self, param_groups, alpha=0.0, muon_momentum=0.95, sgd_lr_scale=0.1):
-        """
-        Args:
-            param_groups: Standard PyTorch param_groups dict list.
-            alpha: Probability of taking an SGD step instead of MUON.
-            muon_momentum: Shared momentum value.
-            sgd_lr_scale: Multiplier for SGD's learning rate relative to MUON's scheduled LR.
-        """
-        self.alpha = alpha
-        self.sgd_lr_scale = sgd_lr_scale
+class SignSGD(optim.Optimizer):
 
-        muon_groups = []
-        adam_groups = []
-
-        # 1. Parse user groups
-        for group in param_groups:
-            group_copy = {k: v for k, v in group.items()}
-            use_muon = group_copy.pop('use_muon', False)
-
-            if use_muon:
-                group_copy.setdefault('momentum', muon_momentum)
-                muon_groups.append(group_copy)
-            else:
-                adam_groups.append(group_copy)
-
-        # 2. Init wrapper optimizer
-        defaults = dict(lr=1e-3)
-        super().__init__(muon_groups + adam_groups, defaults)
-
-        # 3. Re-slice references for the master scheduler
-        self.muon_groups = self.param_groups[:len(muon_groups)]
-        self.adam_groups = self.param_groups[len(muon_groups):]
-
-        # 4. Initialize Internal Optimizers
-        if self.muon_groups:
-            # Safely check if Muon was imported or defined globally
-            try:
-                Muon
-            except NameError:
-                raise ImportError(
-                    "The 'Muon' class is not defined. Please ensure the 'muon' package "
-                    "is installed in your environment or the class is defined in your script."
-                )
-
-            # FIX: Muon's __init__ strictly asserts a list of parameter tensors, not dicts.
-            # We extract them into a flat list to satisfy the assertion.
-            flat_muon_params = []
-            for g in self.muon_groups:
-                flat_muon_params.extend(g['params'])
-
-            init_lr = self.muon_groups[0].get('lr', 0.02)
-            init_momentum = self.muon_groups[0].get('momentum', muon_momentum)
-            init_wd = self.muon_groups[0].get('weight_decay', 0.0)
-
-            self.muon = Muon(flat_muon_params, lr=init_lr, momentum=init_momentum, weight_decay=init_wd)
-
-            # CRITICAL: Re-bind the param_groups to our master wrapper's groups.
-            # This ensures that when LambdaLR updates the wrapper, Muon sees the exact same updated LRs!
-            self.muon.param_groups = self.muon_groups
-
-            # Give SGD its own distinct copy of the dictionaries.
-            # We copy the keys, but the 'params' list still points to the EXACT SAME tensor objects.
-            self.sgd_groups = [
-                {'params': g['params'], **{k: v for k, v in g.items() if k != 'params'}}
-                for g in self.muon_groups
-            ]
-
-            self.sgd = SGD(self.sgd_groups, lr=0.0)
-
-            # Bind states together. Because the tensor objects are identical in memory,
-            # they hash to the exact same momentum buffers in this master dictionary.
-            self.muon.state = self.state
-            self.sgd.state = self.state
-        else:
-            self.muon, self.sgd = None, None
-
-        if self.adam_groups:
-            self.adam = AdamW(self.adam_groups, lr=0.0)
-            self.adam.state = self.state
-        else:
-            self.adam = None
-
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            loss = closure()
-
-        if self.adam is not None:
-            self.adam.step()
-
-        if self.muon is not None and self.sgd is not None:
-            if random.random() < self.alpha:
-                for mg, sg in zip(self.muon_groups, self.sgd_groups):
-                    sg['lr'] = mg['lr'] * self.sgd_lr_scale
-                self.sgd.step()
-            else:
-                self.muon.step()
-
-        return loss
-
-    def update_alpha(self, new_alpha):
-        self.alpha = max(0.0, min(1.0, new_alpha))
-
-    def update_sgd_scale(self, new_scale):
-        """Optional: Dynamically adjust the SGD LR ratio during training."""
-        self.sgd_lr_scale = max(0.0, new_scale)
-
-
-import torch
-from torch.optim import Optimizer
-
-
-class InterpolatedMuon(Optimizer):
-    """
-    Ottimizzatore ibrido che interpola tra Muon (proiezione ortogonale) e SGD-Momentum.
-    Implementa esplicitamente la curva spettrale D = beta * I + (1 - beta) * Sigma.
-    """
-
-    def __init__(self, params, lr=1e-3, momentum=0.9, beta_interp=0.8, weight_decay=0.01):
-        if not 0.0 <= beta_interp <= 1.0:
-            raise ValueError(f"beta_interp deve essere in [0, 1], ottenuto {beta_interp}")
-
-        defaults = dict(lr=lr, momentum=momentum, beta_interp=beta_interp, weight_decay=weight_decay)
+    def __init__(self, params, lr=0.01, rand_zero=True):
+        defaults = dict(lr=lr, rand_zero=rand_zero)
         super().__init__(params, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
         for group in self.param_groups:
             lr = group['lr']
-            momentum = group['momentum']
-            beta = group['beta_interp']
-            wd = group['weight_decay']
+            rand_zero = group['rand_zero']
 
             for p in group['params']:
                 if p.grad is None:
                     continue
 
-                grad = p.grad
-                state = self.state[p]
+                grad = torch.sign(p.grad)
 
-                if len(state) == 0:
-                    state['momentum_buffer'] = torch.zeros_like(p)
+                if rand_zero:
+                    zero_mask = (grad == 0)
+                    if zero_mask.any():
+                        grad[zero_mask] = torch.randint(
+                            0, 2, (zero_mask.sum().item(),),
+                            dtype=grad.dtype,
+                            device=grad.device
+                        ) * 2 - 1
 
-                buf = state['momentum_buffer']
+                p.add_(grad, alpha=-lr)
 
-                if wd != 0:
-                    p.mul_(1 - lr * wd)
+        return loss
 
-                buf.mul_(momentum).add_(grad, alpha=1 - momentum)
 
-                if p.ndim >= 2:
-                    shape = buf.shape
-                    M_2d = buf.view(shape[0], -1)
+"""
+stochastic_sign_muon.py
+=======================
+StochasticSignMuon: per-step stochastic interpolation between Muon and SignSGD
+for 2-D hidden weight matrices, with AdamW for everything else.
 
-                    O_t = self._newton_schulz_accelerated(M_2d)
-                    update_2d = beta * O_t + (1 - beta) * M_2d
+Design principle
+----------------
+Both Muon and SignSGD operate on the *same* Nesterov momentum buffer:
 
-                    update = update_2d.view(shape)
-                else:
-                    update = buf
+    buf  ←  β·buf + (1-β)·grad                  # EMA (identical for both)
+    pre  =  (1-β)·grad + β·buf                   # Nesterov blend (identical for both)
 
-                p.add_(update, alpha=-lr)
+    Muon branch :  update = NS(pre) · scale      # orthogonalise
+    Sign branch :  update = sign(pre) / √n       # sign-normalised
 
-    @staticmethod
-    @torch.compile
-    def _newton_schulz_accelerated(G, steps=5):
-        a, b, c = 3.4445, -4.7750, 2.0315
+Because the momentum path is fully shared, τ can be freely scheduled — or even
+changed every step — without resetting or corrupting any state.
 
-        X = G.to(torch.bfloat16) if G.dtype == torch.float16 else G.clone()
+Frobenius-norm alignment
+------------------------
+Muon's NS output has F-norm ≈ √m for an m×n matrix (m = rows).
+sign(pre) has F-norm = √(m·n).
+Dividing by √n makes the Sign branch produce the same F-norm as Muon,
+so the learning rate carries the same meaning in both branches.
 
-        X /= (X.norm() + 1e-7)
+Usage (single device)
+---------------------
+    from stochastic_sign_muon import SingleDeviceStochasticSignMuon
 
-        for _ in range(steps):
-            A = X @ X.mT
-            B = b * A + c * (A @ A)
-            X = a * X + B @ X
+    hidden_weights = [p for p in model.body.parameters() if p.ndim >= 2]
+    rest = (
+        [p for p in model.body.parameters() if p.ndim < 2]
+        + list(model.head.parameters())
+        + list(model.embed.parameters())
+    )
 
-        return X.to(G.dtype)
+    optimizer = SingleDeviceStochasticSignMuon(
+        [
+            dict(params=hidden_weights, use_muon=True,  lr=0.02,  weight_decay=0.01),
+            dict(params=rest,           use_muon=False, lr=3e-4,  betas=(0.9, 0.95),
+                 weight_decay=0.01),
+        ],
+        tau=0.0,        # start as pure Muon; schedule upward to inject Sign noise
+    )
+
+    # Inside the training loop you can change tau at any time:
+    optimizer.set_tau(0.3)   # 30 % of steps will now be Sign steps
+"""
+
+import torch
+import torch.distributed as dist
+try:
+    from muon import zeropower_via_newtonschulz5, adam_update
+except ImportError:
+    flag("Unable to import muon, consider downloading it via pip install git+https://github.com/KellerJordan/Muon.git to use Muon backed optimizers")
+
+
+# ---------------------------------------------------------------------------
+# Shared update primitives
+# ---------------------------------------------------------------------------
+
+def _nesterov_momentum(
+        grad: torch.Tensor,
+        buf: torch.Tensor,
+        beta: float,
+) -> torch.Tensor:
+    """
+    EMA update followed by a Nesterov combination.
+
+    Modifies `buf` and `grad` in-place (safe inside @torch.no_grad).
+    Returns the Nesterov pre-update vector.
+    """
+    buf.lerp_(grad, 1.0 - beta)  # buf  ←  β·buf + (1-β)·grad
+    return grad.lerp_(buf, beta)  # returns (1-β)·grad + β·buf  [Nesterov]
+
+
+def _muon_branch(pre: torch.Tensor, ns_steps: int = 5) -> torch.Tensor:
+    """
+    Newton-Schulz orthogonalisation + anisotropic scaling.
+    Output F-norm ≈ √m for an m×n pre-update.
+    Returns a tensor of the same shape as `pre`.
+    """
+    u = pre.view(len(pre), -1) if pre.ndim == 4 else pre
+    u = zeropower_via_newtonschulz5(u, steps=ns_steps)
+    u = u * max(1.0, u.size(-2) / u.size(-1)) ** 0.5
+    return u
+
+
+def _sign_branch(pre: torch.Tensor, rand_zero: bool = True) -> torch.Tensor:
+    """
+    Signed update normalised to match Muon's output F-norm.
+
+    sign(pre) has F-norm √(m·n). Dividing by √n yields √m, matching Muon.
+    Zero entries are randomised to ±1 when rand_zero=True.
+    Returns a tensor of the same shape as `pre`.
+    """
+    u = pre.view(len(pre), -1) if pre.ndim == 4 else pre
+
+    s = torch.sign(u)
+
+    if rand_zero:
+        zero_mask = s == 0
+        if zero_mask.any():
+            s[zero_mask] = (
+                    torch.randint(
+                        0, 2,
+                        (zero_mask.sum().item(),),
+                        dtype=u.dtype,
+                        device=u.device,
+                    ) * 2 - 1
+            )
+
+    # Normalise: √(m·n) / √n = √m  →  same F-norm as the Muon branch
+    s = s / (u.size(-1) ** 0.5)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Single-device variant
+# ---------------------------------------------------------------------------
+
+class SingleDeviceStochasticSignMuon(torch.optim.Optimizer):
+    """
+    Non-distributed stochastic Muon ↔ SignSGD interpolation with AdamW aux.
+
+    Parameters
+    ----------
+    param_groups : list[dict]
+        Each group must contain ``use_muon`` (bool).
+
+        use_muon=True  groups recognise:  lr, momentum, weight_decay
+        use_muon=False groups recognise:  lr, betas, eps, weight_decay
+
+    tau : float
+        Probability of taking a Sign step instead of a Muon step. [0, 1].
+        0.0 → pure Muon (default).  1.0 → pure SignSGD.
+        Schedule via :meth:`set_tau`. No state reset required.
+
+    sign_lr_scale : float
+        Multiplicative downscale applied to lr when the Sign branch fires.
+        Compensates for Sign's lower signal-to-noise ratio vs Muon at equal
+        F-norm. Default 0.1; tune in [0.05, 0.2].
+        Schedule via :meth:`set_sign_lr_scale`. No state reset required.
+        Weight decay is always applied at the base group lr regardless.
+
+    rand_zero : bool
+        Randomise zero-gradient sign entries in the Sign branch (default True).
+
+    nesterov : bool
+        Use Nesterov momentum (default True, matching canonical Muon).
+
+    ns_steps : int
+        Newton-Schulz iteration count for the Muon branch (default 5).
+    """
+
+    def __init__(
+            self,
+            param_groups,
+            tau: float = 0.0,
+            sign_lr_scale: float = 0.1,
+            rand_zero: bool = True,
+            nesterov: bool = True,
+            ns_steps: int = 5,
+    ):
+        assert 0.0 <= tau <= 1.0, f"tau must be in [0, 1], got {tau}"
+        assert sign_lr_scale > 0.0, f"sign_lr_scale must be > 0, got {sign_lr_scale}"
+
+        self.tau = tau
+        self.sign_lr_scale = sign_lr_scale
+        self.rand_zero = rand_zero
+        self.nesterov = nesterov
+        self.ns_steps = ns_steps
+
+        for group in param_groups:
+            assert "use_muon" in group, "Every param group must have a 'use_muon' key."
+            if group["use_muon"]:
+                group.setdefault("lr", 0.02)
+                group.setdefault("momentum", 0.95)
+                group.setdefault("weight_decay", 0.0)
+                allowed = {"params", "lr", "momentum", "weight_decay", "use_muon"}
+                assert set(group.keys()) == allowed, (
+                    f"Unexpected keys in Muon group: {set(group.keys()) - allowed}"
+                )
+            else:
+                group.setdefault("lr", 3e-4)
+                group.setdefault("betas", (0.9, 0.95))
+                group.setdefault("eps", 1e-10)
+                group.setdefault("weight_decay", 0.0)
+                allowed = {"params", "lr", "betas", "eps", "weight_decay", "use_muon"}
+                assert set(group.keys()) == allowed, (
+                    f"Unexpected keys in Adam group: {set(group.keys()) - allowed}"
+                )
+
+        super().__init__(param_groups, {})
+
+    # ------------------------------------------------------------------
+    # Scheduling API
+    # ------------------------------------------------------------------
+
+    def set_tau(self, tau: float) -> None:
+        """
+        Set the Muon ↔ Sign mixing probability.
+        Safe to call at any point; does not reset any optimizer state.
+        """
+        assert 0.0 <= tau <= 1.0, f"tau must be in [0, 1], got {tau}"
+        self.tau = tau
+
+    def set_sign_lr_scale(self, scale: float) -> None:
+        """
+        Set the lr multiplier for Sign steps.
+        Safe to call at any point; does not reset any optimizer state.
+        """
+        assert scale > 0.0, f"sign_lr_scale must be > 0, got {scale}"
+        self.sign_lr_scale = scale
+
+    # ------------------------------------------------------------------
+    # Step
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        # One global Bernoulli draw: all 2-D params follow the same branch this step.
+        use_sign: bool = (torch.rand(1).item() < self.tau)
+
+        for group in self.param_groups:
+
+            if group["use_muon"]:
+                beta = group["momentum"]
+                base_lr = group["lr"]
+                effective_lr = base_lr * self.sign_lr_scale if use_sign else base_lr
+
+                for p in group["params"]:
+                    if p.grad is None:
+                        p.grad = torch.zeros_like(p)
+
+                    state = self.state[p]
+                    if not state:
+                        state["momentum_buffer"] = torch.zeros_like(p)
+
+                    # Shared momentum step (identical regardless of branch)
+                    pre = _nesterov_momentum(p.grad, state["momentum_buffer"], beta)
+
+                    # Branch selection
+                    if use_sign:
+                        update = _sign_branch(pre, rand_zero=self.rand_zero)
+                    else:
+                        update = _muon_branch(pre, ns_steps=self.ns_steps)
+
+                    # Weight decay at base lr; parameter update at effective lr
+                    p.mul_(1.0 - base_lr * group["weight_decay"])
+                    p.add_(update.reshape(p.shape), alpha=-effective_lr)
+
+            else:  # AdamW
+                for p in group["params"]:
+                    if p.grad is None:
+                        p.grad = torch.zeros_like(p)
+
+                    state = self.state[p]
+                    if not state:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+
+                    state["step"] += 1
+                    update = adam_update(
+                        p.grad,
+                        state["exp_avg"],
+                        state["exp_avg_sq"],
+                        state["step"],
+                        group["betas"],
+                        group["eps"],
+                    )
+                    p.mul_(1.0 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
+
+        return loss
+
+
+# ---------------------------------------------------------------------------
+# Distributed variant
+# ---------------------------------------------------------------------------
+
+class StochasticSignMuon(torch.optim.Optimizer):
+    """
+    Distributed stochastic Muon ↔ SignSGD interpolation with AdamW aux.
+
+    Requires an initialised ``torch.distributed`` process group.
+    Parameters are sorted by size and sharded across ranks exactly as in the
+    original ``MuonWithAuxAdam``.
+
+    The Bernoulli draw is made on rank 0 and broadcast to all ranks so that
+    every GPU takes the same branch on every step.
+
+    See ``SingleDeviceStochasticSignMuon`` for the full parameter docstring.
+    """
+
+    def __init__(
+            self,
+            param_groups,
+            tau: float = 0.0,
+            sign_lr_scale: float = 0.1,
+            rand_zero: bool = True,
+            nesterov: bool = True,
+            ns_steps: int = 5,
+    ):
+        assert 0.0 <= tau <= 1.0, f"tau must be in [0, 1], got {tau}"
+        assert sign_lr_scale > 0.0, f"sign_lr_scale must be > 0, got {sign_lr_scale}"
+
+        self.tau = tau
+        self.sign_lr_scale = sign_lr_scale
+        self.rand_zero = rand_zero
+        self.nesterov = nesterov
+        self.ns_steps = ns_steps
+
+        for group in param_groups:
+            assert "use_muon" in group, "Every param group must have a 'use_muon' key."
+            if group["use_muon"]:
+                group["params"] = sorted(
+                    group["params"], key=lambda x: x.size(), reverse=True
+                )
+                group.setdefault("lr", 0.02)
+                group.setdefault("momentum", 0.95)
+                group.setdefault("weight_decay", 0.0)
+                allowed = {"params", "lr", "momentum", "weight_decay", "use_muon"}
+                assert set(group.keys()) == allowed
+            else:
+                group.setdefault("lr", 3e-4)
+                group.setdefault("betas", (0.9, 0.95))
+                group.setdefault("eps", 1e-10)
+                group.setdefault("weight_decay", 0.0)
+                allowed = {"params", "lr", "betas", "eps", "weight_decay", "use_muon"}
+                assert set(group.keys()) == allowed
+
+        super().__init__(param_groups, {})
+
+    # ------------------------------------------------------------------
+    # Scheduling API
+    # ------------------------------------------------------------------
+
+    def set_tau(self, tau: float) -> None:
+        """Schedule the Muon ↔ Sign mixing probability. Safe from any rank."""
+        assert 0.0 <= tau <= 1.0, f"tau must be in [0, 1], got {tau}"
+        self.tau = tau
+
+    def set_sign_lr_scale(self, scale: float) -> None:
+        """Schedule the lr multiplier for Sign steps. Safe from any rank."""
+        assert scale > 0.0, f"sign_lr_scale must be > 0, got {scale}"
+        self.sign_lr_scale = scale
+
+    # ------------------------------------------------------------------
+    # Step
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        # Broadcast the Bernoulli draw from rank 0 so every GPU takes the same branch.
+        use_sign_t = torch.zeros(1, dtype=torch.float32,
+                                 device=torch.device("cuda", rank))
+        if rank == 0:
+            use_sign_t[0] = 1.0 if torch.rand(1).item() < self.tau else 0.0
+        dist.broadcast(use_sign_t, src=0)
+        use_sign: bool = use_sign_t.item() > 0.5
+
+        for group in self.param_groups:
+
+            if group["use_muon"]:
+                beta = group["momentum"]
+                base_lr = group["lr"]
+                effective_lr = base_lr * self.sign_lr_scale if use_sign else base_lr
+
+                params = group["params"]
+                params_pad = params + [torch.empty_like(params[-1])] * (
+                        world_size - len(params) % world_size
+                )
+
+                for base_i in range(0, len(params), world_size):
+                    local_idx = base_i + rank
+                    if local_idx < len(params):
+                        p = params[local_idx]
+                        if p.grad is None:
+                            p.grad = torch.zeros_like(p)
+
+                        state = self.state[p]
+                        if not state:
+                            state["momentum_buffer"] = torch.zeros_like(p)
+
+                        pre = _nesterov_momentum(
+                            p.grad, state["momentum_buffer"], beta
+                        )
+
+                        if use_sign:
+                            update = _sign_branch(pre, rand_zero=self.rand_zero)
+                        else:
+                            update = _muon_branch(pre, ns_steps=self.ns_steps)
+
+                        # Weight decay at base lr; parameter update at effective lr
+                        p.mul_(1.0 - base_lr * group["weight_decay"])
+                        p.add_(update.reshape(p.shape), alpha=-effective_lr)
+
+                    dist.all_gather(
+                        params_pad[base_i: base_i + world_size],
+                        params_pad[base_i + rank],
+                    )
+
+            else:  # AdamW
+                for p in group["params"]:
+                    if p.grad is None:
+                        p.grad = torch.zeros_like(p)
+
+                    state = self.state[p]
+                    if not state:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+
+                    state["step"] += 1
+                    update = adam_update(
+                        p.grad,
+                        state["exp_avg"],
+                        state["exp_avg_sq"],
+                        state["step"],
+                        group["betas"],
+                        group["eps"],
+                    )
+                    p.mul_(1.0 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
+
+        return loss

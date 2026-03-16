@@ -926,12 +926,12 @@ class TaylorAct(nn.Module):
 
 
 class FastPoly3(nn.Module):
-    def __init__(self, channels: int):
+    def __init__(self, d_model: int):
         super().__init__()
-        self.a0 = nn.Parameter(torch.zeros(channels))
-        self.a1 = nn.Parameter(torch.ones(channels))
-        self.a2 = nn.Parameter(torch.zeros(channels))
-        self.a3 = nn.Parameter(torch.zeros(channels))
+        self.a0 = nn.Parameter(torch.zeros(d_model))
+        self.a1 = nn.Parameter(torch.ones(d_model))
+        self.a2 = nn.Parameter(torch.zeros(d_model))
+        self.a3 = nn.Parameter(torch.zeros(d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.a0 + x * (self.a1 + x * (self.a2 + x * self.a3))
