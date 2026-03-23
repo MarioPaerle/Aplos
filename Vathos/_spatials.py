@@ -1615,3 +1615,69 @@ class NSAttention(Layer):
         q, k, v = qkv.chunk(3, dim=-1)
         kv = k.transpose(-1, -2) @ v
         return q @ kv.transpose(-1, -2)
+
+
+# MODDED NANO GPT
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int, rope_base: float, qk_gain_init: float):
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError("model_dim must be divisible by num_heads")
+
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        if self.head_dim % 2 != 0:
+            raise ValueError("head_dim must be even for RoPE")
+
+        # FUSED QKV: Output dimension is 3 * dim
+        self.c_qkv = CastedLinear(dim, 3 * dim, bias=False)
+
+        self.proj = CastedLinear(dim, dim, bias=False)
+        self.proj._zero_init = True
+
+        self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
+        self.rotary = Rotary(self.head_dim, base=rope_base)
+
+    def forward(self, x: Tensor) -> Tensor:
+        bsz, seqlen, dim = x.shape
+
+        # 1. Single fused linear projection
+        # Shape: (bsz, seqlen, 3 * dim)
+        qkv = self.c_qkv(x)
+
+        # 2. Reshape and slice into Q, K, V
+        # Reshape to: (bsz, seqlen, 3, num_heads, head_dim)
+        qkv = qkv.reshape(bsz, seqlen, 3, self.num_heads, self.head_dim)
+        # Permute to: (3, bsz, num_heads, seqlen, head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+
+        # Unbind separates the first dimension (the '3') into a tuple
+        q, k, v = qkv.unbind(0)
+
+        # 3. Apply norms
+        q = F.rms_norm(q, (q.size(-1),))
+        k = F.rms_norm(k, (k.size(-1),))
+
+        # 4. RoPE
+        cos, sin = self.rotary(seqlen, x.device, q.dtype)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+
+        # 5. Q-gain scaling
+        q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+
+        # 6. Attention
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            is_causal=True,
+            enable_gqa=False,  # Standard MHA
+        )
+
+        # 7. Final projection
+        y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
+        return self.proj(y)

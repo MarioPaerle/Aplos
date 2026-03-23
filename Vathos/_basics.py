@@ -13,6 +13,7 @@ from timeit import default_timer as timer
 from collections import OrderedDict, defaultdict
 import re
 import math
+from torch import Tensor
 
 ACTIVS = {
     'tanh': nn.Tanh,
@@ -935,6 +936,12 @@ class FastPoly3(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.a0 + x * (self.a1 + x * (self.a2 + x * self.a3))
+
+
+class CastedLinear(nn.Linear):
+    def forward(self, x: Tensor) -> Tensor:
+        bias = self.bias.to(x.dtype) if self.bias is not None else None
+        return F.linear(x, self.weight.to(x.dtype), bias)
 
 
 if __name__ == '__main__':
