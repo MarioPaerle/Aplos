@@ -1156,7 +1156,8 @@ class ModdedFormer(VathosModel):
                  baseblock=Block1d, norm=RMSNorm, ffn_act=ReLU2, unet_skips=False, max_len=2400, zeroskip=False,
                  UDLP=VariableUDLP,
                  skips: List[int | None] | None = None, value_embeddings: List[int | None] | None = None,
-                 ve_type: str = 'scalar', ve_gate_dim: int | None = None):
+                 ve_type: str = 'scalar', ve_gate_dim: int | None = None,
+                 learnable_pe: bool = False):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -1234,6 +1235,10 @@ class ModdedFormer(VathosModel):
         else:
             self.ve_embeddings = nn.ModuleDict()
 
+        self.learnable_pe = learnable_pe
+        if self.learnable_pe:
+            self.pos_emb = nn.Parameter(torch.zeros(1, max_len, embed_dim))
+
         self.final_norm = RMSNorm(d_models[-1])
         self._init_weights()
 
@@ -1246,7 +1251,13 @@ class ModdedFormer(VathosModel):
 
     def forward(self, x):
         input_ids = x
+        seq_len = x.size(1)
+
         x0 = self.embedder(x)
+
+        if self.learnable_pe:
+            x0 = x0 + self.pos_emb[:, :seq_len, :]
+
         x = x0
 
         active_skips = {}
@@ -1286,6 +1297,9 @@ class ModdedFormer(VathosModel):
         except:
             pass
 
+        if self.learnable_pe:
+            nn.init.normal_(self.pos_emb, mean=0.0, std=std_embed)
+
         for block_idx, block in enumerate(self.blocks):
             block.channel_mixer._init_weights()
             try:
@@ -1296,6 +1310,7 @@ class ModdedFormer(VathosModel):
     def summary(self):
         print(f"Vathos {NUM}ModdedFormer{RES} Summary")
         print(f"Embedding dim: {self.embed_dim}")
+        print(f"Learnable PE: {self.learnable_pe}")
         print(f"Skips: {self.skips}")
         for i in range(self.n_layer):
             if i == 0:

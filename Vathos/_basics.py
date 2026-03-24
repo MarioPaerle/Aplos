@@ -719,6 +719,103 @@ class VariableUDLP(Layer):
         return self.dropout(self.contract(self.activation(self.expand(x))))
 
 
+class VariableUDLP_Attention(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00, use_qk_norm=True):
+        super().__init__()
+        self.d_model = d_model
+        self.d_output = d_output
+        self.half_dim = d_model // 2
+
+        # Dimensione delle query/key. Per efficienza la tengo pari a half_dim
+        self.d_k = self.half_dim
+
+        # Q = X W_q
+        self.W_q = nn.Linear(self.half_dim, self.d_k, bias=False)
+
+        # K = W_k (Matrice di parametri appresi, forma: [M, d_k])
+        self.W_k = nn.Parameter(torch.empty(M, self.d_k))
+        torch.nn.init.normal_(self.W_k, std=self.d_k ** -0.5)
+
+        # V = W_v corrisponde al tuo 'contract'
+        self.contract = nn.Linear(M, d_output, bias=False)
+
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+        # QK Norm
+        self.use_qk_norm = use_qk_norm
+        if self.use_qk_norm:
+            self.q_norm = nn.RMSNorm(self.d_k)
+            self.k_norm = nn.RMSNorm(self.d_k)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        # 1. Prendiamo solo mezza residual stream
+        x_half = x[..., :self.half_dim]
+
+        # 2. Calcoliamo le Query e prendiamo le Key
+        q = self.W_q(x_half)
+        k = self.W_k
+
+        # 3. QK Norm
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        # 4. Score dell'attention: Q K^T
+        # q è [..., d_k], k è [M, d_k]. F.linear(q, k) fa esattamente q @ k.T
+        scores = F.linear(q, k)
+
+        # 5. Attivazione generica (es. ReLU^2) e Dropout
+        h = self.dropout(self.activation(scores))
+
+        # 6. Proiezione V (contract) e padding automatico se d_output < d_model
+        out = self.contract(h)
+
+        if self.d_output < self.d_model:
+            out = F.pad(out, (0, self.d_model - self.d_output))
+
+        return out
+
+
+class VariableUDLP_CrossGate(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.d_model = d_model
+        self.d_output = d_output
+        self.half_dim = d_model // 2
+
+        # Ramo di attivazione (legge la prima metà)
+        self.expand_k = nn.Linear(self.half_dim, M, bias=False)
+
+        # Ramo di gating (legge la seconda metà)
+        self.expand_g = nn.Linear(d_model - self.half_dim, M, bias=False)
+
+        # Proiezione finale
+        self.contract = nn.Linear(M, d_output, bias=False)
+
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        x_left = x[..., :self.half_dim]
+        x_right = x[..., self.half_dim:]
+
+        hk = self.expand_k(x_left)
+        hg = self.expand_g(x_right)
+
+        h = self.dropout(self.activation(hk) * hg)
+
+        out = self.contract(h)
+
+        return out
+
+
 class DoubleUDLP(Layer):
     def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
         super().__init__()

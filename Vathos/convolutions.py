@@ -60,3 +60,37 @@ class RWKVTimeMix(nn.Module):
         mix = self.time_mix.to(x.dtype)
 
         return x * mix + x_prev * (1.0 - mix)
+
+
+class SmearGate(nn.Module):
+    def __init__(self, dim: int, gate_dim: int = 12):
+        super().__init__()
+        self.gate_dim = min(gate_dim, dim)
+
+        self.W_g = nn.Parameter(torch.zeros(self.gate_dim, dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_prev = F.pad(x[:, :-1, :], (0, 0, 1, 0))
+
+        x_slice = x[..., :self.gate_dim]
+
+        g = torch.sigmoid(torch.matmul(x_slice, self.W_g.to(x.dtype)))
+        return (1.0 - g) * x + g * x_prev
+
+
+class ModdedSmearGate(nn.Module):
+    def __init__(self, gate_dim: int = 12):
+        super().__init__()
+        self.gate_dim = gate_dim
+
+        self.smear_gate = nn.Linear(gate_dim, 1, bias=False)
+
+        with torch.no_grad():
+            nn.init.zeros_(self.smear_gate.weight)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_prev = F.pad(x[:, :-1, :], (0, 0, 1, 0))
+        x_slice = x[..., :self.gate_dim]
+
+        g = torch.sigmoid(self.smear_gate(x_slice))
+        return x + g * (x_prev - x)
