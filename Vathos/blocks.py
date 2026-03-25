@@ -1157,7 +1157,7 @@ class ModdedFormer(VathosModel):
                  UDLP=VariableUDLP,
                  skips: List[int | None] | None = None, value_embeddings: List[int | None] | None = None,
                  ve_type: str = 'scalar', ve_gate_dim: int | None = None,
-                 learnable_pe: bool = False):
+                 learnable_pe: bool = False, input_projections: bool | int=False, smear_gate: None | nn.Module | Layer=False):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -1165,7 +1165,8 @@ class ModdedFormer(VathosModel):
         assert max(d_models) == min(d_models), "Variables d_models is WIP and not working"
         self.d_models = d_models
         n_layers = self.n_layer = len(d_models)
-
+        self.input_projections = input_projections
+        self.smear_gate = smear_gate
         if M_dims is not None:
             self.M_dims = M_dims
         else:
@@ -1209,6 +1210,12 @@ class ModdedFormer(VathosModel):
 
         if zeroskip:
             self.zeroskip_params = nn.ParameterList([nn.Parameter(torch.tensor([0.0])) for _ in range(n_layers)])
+        if input_projections > 0:
+            if not zeroskip:
+                raise ValueError("Zeroskip must be activated when using input_projections")
+            self.inputs_projection_linears = nn.Linear(in_features=d_models[0], out_features=d_models[0]*input_projections, bias=False)
+            self.inputs_projection_params = nn.ParameterList([nn.Parameter(torch.tensor([0.0])) for _ in range(n_layers) for i in range(input_projections)])
+
 
         assert ve_type in ('scalar', 'gate'), f"ve_type must be 'scalar' or 'gate', got {ve_type}"
         self.ve_type = ve_type
@@ -1255,8 +1262,14 @@ class ModdedFormer(VathosModel):
 
         x0 = self.embedder(x)
 
+        if self.input_projections > 0:
+            xs = self.inputs_projection_linears(x0).chunk(self.input_projections, dim=-1)
+
         if self.learnable_pe:
             x0 = x0 + self.pos_emb[:, :seq_len, :]
+
+        if self.smear_gate:
+            x0 = self.smear_gate(x0)
 
         x = x0
 
@@ -1268,9 +1281,8 @@ class ModdedFormer(VathosModel):
                 group_id = self.value_embeddings_cfg[i]
                 ve = self.ve_embeddings[str(group_id)](input_ids)
                 ve = self._apply_ve_weight(ve, x, i)
-
             if self.zeroskip:
-                x = block(x, ve=ve) + x0 * self.zeroskip_params[i]
+                x = block(x, ve=ve) + x0 * self.zeroskip_params[i] + sum([x*p for x, p in zip(xs, self.inputs_projection_params[i*self.input_projections:(i+1)*self.input_projections])])
             else:
                 x = block(x, ve=ve)
 
@@ -1481,7 +1493,8 @@ if __name__ == "__main__":
         d_models=d_models,
         spatials=[attn for _ in range(len(d_models))],
         M_dims=m_dims,
-        skips=[None, 3, None, None]
+        input_projections=3,
+        zeroskip=True
     )
     model.summary()
 

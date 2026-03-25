@@ -389,6 +389,47 @@ class Linear(Layer):
         return self.linear(x)
 
 
+class BottleneckRepeatedLinear(nn.Module):
+    def __init__(self, in_features, out_features, num_repeats, bias=False, scale_variance=False):
+        super().__init__()
+
+        assert out_features % num_repeats == 0, "out_features must be strictly divisible by num_repeats"
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.num_repeats = num_repeats
+        self.bottleneck_dim = out_features // num_repeats
+        self.scale_variance = scale_variance
+
+        self.weight = nn.Parameter(torch.Tensor(self.bottleneck_dim, in_features))
+
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(self.bottleneck_dim))
+        else:
+            self.register_parameter('bias', None)
+
+        self.init_parameters()
+
+    def init_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x):
+        y = F.linear(x, self.weight, self.bias)
+
+        repeat_shape = [1] * (y.dim() - 1) + [self.num_repeats]
+
+        out = y.repeat(*repeat_shape)
+
+        if self.scale_variance:
+            out = out / math.sqrt(self.num_repeats)
+
+        return out
+
+
 class ProductLinear(Layer):
     __name__ = 'Linear'
 
