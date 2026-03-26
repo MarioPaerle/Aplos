@@ -1281,8 +1281,10 @@ class ModdedFormer(VathosModel):
                 group_id = self.value_embeddings_cfg[i]
                 ve = self.ve_embeddings[str(group_id)](input_ids)
                 ve = self._apply_ve_weight(ve, x, i)
-            if self.zeroskip:
-                x = block(x, ve=ve) + x0 * self.zeroskip_params[i] + sum([x*p for x, p in zip(xs, self.inputs_projection_params[i*self.input_projections:(i+1)*self.input_projections])])
+            if self.zeroskip and self.input_projections > 0:
+                x = block(x, ve=ve) + x0 * self.zeroskip_params[i] + sum([x * p for x, p in zip(xs,self.inputs_projection_params[i * self.input_projections: (i + 1) * self.input_projections])])
+            elif self.zeroskip:
+                x = block(x, ve=ve) + x0 * self.zeroskip_params[i]
             else:
                 x = block(x, ve=ve)
 
