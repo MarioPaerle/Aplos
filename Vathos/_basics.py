@@ -13,7 +13,7 @@ from timeit import default_timer as timer
 from collections import OrderedDict, defaultdict
 import re
 import math
-
+from torch import Tensor
 
 ACTIVS = {
     'tanh': nn.Tanh,
@@ -27,35 +27,52 @@ ACTIVS = {
 
 
 class VathosConfig:
-    """Global configuration state"""
-    _COMPILABLE = False  # If True, bypasses all profiling for torch.compile compatibility
-    _PROFILE_BATCHED = True
-    _GLOBAL_PROFILE = True
+    """Global configuration state."""
+    _COMPILABLE = False  # True = production, torch.compile safe
+    _PROFILE_BATCHED = True  # True = times divided by batch size
+    _GLOBAL_PROFILE = True  # True = always profile in debug mode
 
 
 def set_vathos_mode(mode: str):
     """
     Switch Vathos mode globally.
 
-    Args:
-        mode (str): "production" or "debug"
+    'debug'      — profiling enabled, torch.compile unfriendly
+    'production' — profiling disabled, torch.compile safe
     """
     if mode.lower() == "production":
         VathosConfig._COMPILABLE = True
-        print(
-            f"{SEC}Vathos:{RES} Switched to {GOOD}PRODUCTION{RES} mode (Ready for torch.compile, Profiling Disabled).")
+        print(f"{SEC}Vathos:{RES} Switched to {GOOD}PRODUCTION{RES} mode.")
     elif mode.lower() == "debug":
         VathosConfig._COMPILABLE = False
-        print(f"{SEC}Vathos:{RES} Switched to {NUM}DEBUG{RES} mode (Profiling Enabled, torch.compile unfriendly).")
+        print(f"{SEC}Vathos:{RES} Switched to {NUM}DEBUG{RES} mode.")
     else:
         raise ValueError("Mode must be 'production' or 'debug'")
 
 
 # =============================================================================
-# THE UNIFIED LAYER
+# BASE LAYER
 # =============================================================================
 
 class Layer(nn.Module):
+    """
+    ─────────────────────────────────────────────────────────────
+    class MyBlock(Layer):
+        def __init__(self, ...):
+            super().__init__()
+            # define sub-modules here
+            self.lin = nn.Linear(...)
+            self.attn = MultiheadAttentionMixer(...)
+
+        def forward(self, x):
+z            return self.lin(x)
+    ─────────────────────────────────────────────────────────────
+
+    DO NOT override __call__. Profiling is handled via native forward hooks,
+    which are registered automatically in debug mode and completely absent
+    in production mode — zero overhead, full torch.compile compatibility.
+    """
+
     _is_vathos_layer = True
 
     def __init__(self):
@@ -64,70 +81,57 @@ class Layer(nn.Module):
         self.__name__ = self.__class__.__name__
 
         self._timer_unbatched = not VathosConfig._PROFILE_BATCHED
-        self._tstart = 0
-        self._tend = 0
-        self._time = 0
+        self._tstart = 0.0
+        self._tend = 0.0
+        self._time = 0.0
         self._times = []
+
         self._sublayers = None
 
-    def __call__(self, *args, **kwargs):
-        """
-        The Hot-Swappable Entry Point.
-        """
-        # 1. PRODUCTION PATH (Fast, Compilable)
-        # torch.compile will optimize this check away as a constant
-        if VathosConfig._COMPILABLE:
-            # We explicitly remove 'profile' kwarg if it exists to avoid errors in forward
-            if "profile" in kwargs:
-                del kwargs["profile"]
-            return self.forward(*args, **kwargs)
+        # Hooks are registered ONCE at construction in debug mode.
+        # In production mode, no hooks exist — no overhead whatsoever.
+        if not VathosConfig._COMPILABLE and VathosConfig._GLOBAL_PROFILE:
+            self._register_profiling_hooks()
 
-        # 2. DEBUG PATH (Slow, Profilable)
-        return self._debug_call(args, kwargs)
+    # -------------------------------------------------------------------------
+    # Profiling hooks — native nn.Module mechanism, __call__ is never touched
+    # -------------------------------------------------------------------------
 
-    def _debug_call(self, args, kwargs):
-        # Lazy registration
-        if self._sublayers is None:
-            self.register_sublayers()
+    def _register_profiling_hooks(self):
+        self.register_forward_pre_hook(self._pre_hook)
+        self.register_forward_hook(self._post_hook)
 
-        # Check local or global profile flag
-        do_profile = kwargs.pop("profile", False) or VathosConfig._GLOBAL_PROFILE
+    def _pre_hook(self, module, args):
+        self._tstart = timer()
 
-        if do_profile:
-            self._tstart = timer()
+    def _post_hook(self, module, args, output):
+        self._tend = timer()
+        bs = 1
+        if args and isinstance(args[0], torch.Tensor):
+            bs = args[0].shape[0]
+        div = bs if not self._timer_unbatched else 1
+        self._time = (self._tend - self._tstart) / div
+        self._times.append(self._time)
 
-            # Actual Forward Pass
-            rets = self.forward(*args, **kwargs)
-
-            self._tend = timer()
-
-            # Calculate batch size for normalization
-            bs = 1
-            if args and isinstance(args[0], torch.Tensor):
-                bs = args[0].shape[0]
-
-            div = bs if not self._timer_unbatched else 1
-            self._time = (self._tend - self._tstart) / div
-            self._times.append(self._time)
-
-            return rets
-        else:
-            return self.forward(*args, **kwargs)
+    # -------------------------------------------------------------------------
+    # Sublayer registry — used by profile()
+    # -------------------------------------------------------------------------
 
     def register_sublayers(self):
         if self._sublayers is None:
             self._sublayers = dict()
 
         def get_unique_name(base_name, existing_names):
-            if base_name not in existing_names: return base_name
+            if base_name not in existing_names:
+                return base_name
             counter = 1
-            while f"{base_name}_{counter}" in existing_names: counter += 1
+            while f"{base_name}_{counter}" in existing_names:
+                counter += 1
             return f"{base_name}_{counter}"
 
         def collect_layers(module, level=0):
             layers = []
             for name, child in module.named_children():
-                # Check for Vathos Layer marker
                 if getattr(child, "_is_vathos_layer", False):
                     layers.append((name, child, level))
                     layers.extend(collect_layers(child, level=level + 1))
@@ -137,32 +141,32 @@ class Layer(nn.Module):
                             layers.append((f"{name}[{i}]", item, level))
                             layers.extend(collect_layers(item, level=level + 1))
                 elif isinstance(child, nn.Module):
-                    # Recurse into standard modules to find hidden Layers
                     layers.extend(collect_layers(child, level=level))
             return layers
 
-        all_layers = collect_layers(self)
-
-        for original_name, layer, level in all_layers:
+        for original_name, layer, level in collect_layers(self):
             class_name = getattr(layer, "__name__", type(layer).__name__)
             unique_name = get_unique_name(class_name, self._sublayers.keys())
-            self._sublayers[unique_name] = {'layer': layer, 'level': level}
+            self._sublayers[unique_name] = {"layer": layer, "level": level}
 
-    def get_mean_execution_time(self):
-        return np.mean(self._times) if len(self._times) > 0 else 0.0
+    # -------------------------------------------------------------------------
+    # Utilities
+    # -------------------------------------------------------------------------
+
+    def get_mean_execution_time(self) -> float:
+        return float(np.mean(self._times)) if self._times else 0.0
+
+    def has_custom_generate(self) -> bool:
+        return type(self).generate is not Layer.generate
 
     def generate(self, *args, **kwargs):
+        """Override in subclasses that support autoregressive generation."""
         return None
 
-    def has_custom_generate(self):
-        return self.generate.__func__ is not Layer.generate
+    def clear_times(self):
+        """Reset profiling history."""
+        self._times.clear()
 
-    def __repr__(self):
-        return f"{SEC}Vathos{RES}: " + super().__repr__()
-
-    # -------------------------------------------------------------------------
-    # Profiling & Plotting Logic (Preserved from your code)
-    # -------------------------------------------------------------------------
     def profile(self, maxlevel=100, avg=False, plot=False, plot_level=1):
         if VathosConfig._COMPILABLE:
             print(f"{BAD}Cannot profile in PRODUCTION mode.{RES} Run set_vathos_mode('debug') first.")
@@ -176,7 +180,6 @@ class Layer(nn.Module):
         order_map = {}
         order_counter = 0
 
-        # Grouping logic
         if self._sublayers:
             for sublayer_name, sublayer_info in self._sublayers.items():
                 layer = sublayer_info['layer']
@@ -193,7 +196,6 @@ class Layer(nn.Module):
                     grouped_layers[key] = []
                 grouped_layers[key].append((sublayer_name, layer))
 
-        # Printing logic
         if not avg:
             if self._sublayers:
                 for sublayer_name, sublayer_info in self._sublayers.items():
@@ -212,25 +214,19 @@ class Layer(nn.Module):
                 else:
                     print(f"{indent}- {NUM}{base_name}_avg{RES}: no time recorded")
 
-        # Plotting logic
         if plot:
             try:
                 import matplotlib.pyplot as plt
                 level_layers = defaultdict(list)
 
-                # Logic to determine which layers to plot (simplified for robustness)
                 for (base_name, level), layers_list in grouped_layers.items():
-                    # If exact level match
                     if level == plot_level:
                         for _, layer in layers_list:
                             if len(layer._times) > 0:
                                 level_layers[base_name].append(np.mean(layer._times))
 
-                    # If lower level but "leaf" relative to plot_level (simplified heuristic)
                     elif level < plot_level:
-                        # For strict correctness based on your previous code,
-                        # you'd need the parent-child check here.
-                        # Assuming direct plot_level usage for now:
+
                         pass
 
                 if level_layers:
@@ -250,6 +246,9 @@ class Layer(nn.Module):
                     print(f"{SEC}No data for plot level {plot_level}{RES}")
             except ImportError:
                 print(f"{BAD}Matplotlib missing{RES}")
+
+    def __repr__(self):
+        return f"{SEC}Vathos{RES}: " + super().__repr__()
 
 
 class Builder:
@@ -295,6 +294,19 @@ class Skip(Layer):
 
     def forward(self, x):
         return self.layer(x) + x
+
+
+class LearntSkip(Layer):
+    __name__ = "Skip"
+    __complexity__ = "O(1)"
+
+    def __init__(self, layer):
+        super().__init__()
+        self.layer = layer
+        self.w = nn.Parameter(torch.tensor([1.0, 1.0]), requires_grad=True)
+
+    def forward(self, x):
+        return self.layer(x) * self.w[0] + x * self.w[1]
 
 
 class IdentityMixer(Layer):
@@ -377,6 +389,81 @@ class Linear(Layer):
         return self.linear(x)
 
 
+class BottleneckRepeatedLinear(nn.Module):
+    def __init__(self, in_features, out_features, num_repeats, bias=False, scale_variance=False):
+        super().__init__()
+
+        assert out_features % num_repeats == 0, "out_features must be strictly divisible by num_repeats"
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.num_repeats = num_repeats
+        self.bottleneck_dim = out_features // num_repeats
+        self.scale_variance = scale_variance
+
+        self.weight = nn.Parameter(torch.Tensor(self.bottleneck_dim, in_features))
+
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(self.bottleneck_dim))
+        else:
+            self.register_parameter('bias', None)
+
+        self.init_parameters()
+
+    def init_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x):
+        y = F.linear(x, self.weight, self.bias)
+
+        repeat_shape = [1] * (y.dim() - 1) + [self.num_repeats]
+
+        out = y.repeat(*repeat_shape)
+
+        if self.scale_variance:
+            out = out / math.sqrt(self.num_repeats)
+
+        return out
+
+
+class ProductLinear(Layer):
+    __name__ = 'Linear'
+
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.weight1 = nn.Parameter(0.1 * torch.randn(output_dim, input_dim))
+        self.weight2 = nn.Parameter(torch.ones(output_dim, input_dim + 0.01 * torch.randn(output_dim, input_dim)))
+
+    def forward(self, x):
+        return F.linear(x, self.weight1 * self.weight2)
+
+
+class DoubleLinear(nn.Module):
+    def __init__(self, in_features: int, out_features: int,
+                 device=None, dtype=None):
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.weight1 = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        nn.init.xavier_uniform_(self.weight1)
+
+        self.weight2 = nn.Parameter(torch.empty((in_features, in_features), **factory_kwargs))
+        nn.init.xavier_uniform_(self.weight2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        W_eff = self.weight1 @ self.weight2
+        return F.linear(x, W_eff)
+
+
 class LowRankLinear(Layer):
     __name__ = 'Linear'
 
@@ -415,15 +502,71 @@ class SwiGLU(Layer):
 
 
 class ReLU2(Layer):
-    gated = True
+    gated = False
     __name__ = "ReLU^2"
     __complexity__ = "O(L)"
 
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = F.relu(x)
+        return x_pos * x_pos
+
+
+class LeakyReLU2(Layer):
+    gated = False
+    __name__ = "LeakyReLU^2"
+    __complexity__ = "O(L)"
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = F.leaky_relu(x, 0.5)
+        return x_pos * x_pos
+
+
+class PSiLU2(Layer):
+    gated = False
+    __name__ = "SiLU^2"
+    __complexity__ = "O(L)"
+
+    def __init__(self):
+        super().__init__()
+        self.param = nn.Parameter(torch.tensor([5.0, 2.0]), requires_grad=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = self.param[0] * F.silu(x / self.param[1])
+        return x_pos * x_pos
+
+
+class LeLU2(Layer):
+    gated = False
+    __name__ = "ReLU^2"
+    __complexity__ = "O(L)"
+
+    def __init__(self):
+        super().__init__()
+        self.a = nn.Parameter(torch.randn(1) - 0.05)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = F.relu(x - self.a)
+        return x_pos * x_pos
+
+
+class PReLU2(Layer):
+    def __init__(self, num_parameters=1):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(num_parameters))
+
     def forward(self, x: torch.Tensor):
-        return torch.relu(x).square()
+        return self.alpha * torch.square(F.relu(x))
 
 
 class UDLPReLU2(Layer):
+    """Unbiased Dual Layer Perceptron, Relu^2 Activation"""
+
     def __init__(self, d_model, expand, dropout=0.075):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand, bias=False)
@@ -492,7 +635,7 @@ class DLPSoftmax(Layer):
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.contract = nn.Linear(m, d_model, bias=False)
 
-        self.scaler = nn.Parameter(torch.tensor([1/math.sqrt(d_model)]))
+        self.scaler = nn.Parameter(torch.tensor([1 / math.sqrt(d_model)]))
 
         self.dropout = nn.Dropout(dropout)
 
@@ -560,7 +703,7 @@ class FlashSDLP(Layer):
 
 
 class DLPSwiGLU(Layer):
-    def __init__(self, d_model, expand, dropout=0.05):
+    def __init__(self, d_model, expand, dropout=0.00):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand * 2, bias=True)
         self.contract = nn.Linear(d_model * expand, d_model, bias=True)
@@ -571,13 +714,173 @@ class DLPSwiGLU(Layer):
         return self.dropout(self.contract(self.activation(self.expand(x))))
 
 
+class LowRankGatedDLP(Layer):
+    def __init__(self, d_model, expand, dropout=0.00, activation=nn.SiLU, rank=64, gate_activation=None):
+        super().__init__()
+        self.ga = gate_activation if gate_activation is not None else Identity()
+        self.act = activation()
+        self.M = d_model * expand
+        self.rank = rank
+        self.expand = nn.Linear(d_model, d_model * expand + rank, bias=False)
+        self.contract = nn.Linear(d_model * expand, d_model, bias=False)
+        self.rexp = nn.Linear(rank, d_model * expand, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out1, gate1 = self.expand(x).split([self.M, self.rank], dim=-1)
+        return self.contract(self.act(out1 * self.ga(self.rexp(gate1))))
+
+
 class UDLPSwiGLU(Layer):
-    def __init__(self, d_model, expand, dropout=0.05):
+    def __init__(self, d_model, expand, dropout=0.00):
         super().__init__()
         self.expand = nn.Linear(d_model, d_model * expand * 2, bias=False)
         self.contract = nn.Linear(d_model * expand, d_model, bias=False)
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class VariableUDLP(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.expand = nn.Linear(d_model, M, bias=False)
+        self.contract = nn.Linear(M, d_output, bias=False)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class VariableUDLP_Attention(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00, use_qk_norm=True):
+        super().__init__()
+        self.d_model = d_model
+        self.d_output = d_output
+        self.half_dim = d_model // 2
+
+        # Dimensione delle query/key. Per efficienza la tengo pari a half_dim
+        self.d_k = self.half_dim
+
+        # Q = X W_q
+        self.W_q = nn.Linear(self.half_dim, self.d_k, bias=False)
+
+        # K = W_k (Matrice di parametri appresi, forma: [M, d_k])
+        self.W_k = nn.Parameter(torch.empty(M, self.d_k))
+        torch.nn.init.normal_(self.W_k, std=self.d_k ** -0.5)
+
+        # V = W_v corrisponde al tuo 'contract'
+        self.contract = nn.Linear(M, d_output, bias=False)
+
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+        # QK Norm
+        self.use_qk_norm = use_qk_norm
+        if self.use_qk_norm:
+            self.q_norm = nn.RMSNorm(self.d_k)
+            self.k_norm = nn.RMSNorm(self.d_k)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        # 1. Prendiamo solo mezza residual stream
+        x_half = x[..., :self.half_dim]
+
+        # 2. Calcoliamo le Query e prendiamo le Key
+        q = self.W_q(x_half)
+        k = self.W_k
+
+        # 3. QK Norm
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        # 4. Score dell'attention: Q K^T
+        # q è [..., d_k], k è [M, d_k]. F.linear(q, k) fa esattamente q @ k.T
+        scores = F.linear(q, k)
+
+        # 5. Attivazione generica (es. ReLU^2) e Dropout
+        h = self.dropout(self.activation(scores))
+
+        # 6. Proiezione V (contract) e padding automatico se d_output < d_model
+        out = self.contract(h)
+
+        if self.d_output < self.d_model:
+            out = F.pad(out, (0, self.d_model - self.d_output))
+
+        return out
+
+
+class VariableUDLP_CrossGate(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.d_model = d_model
+        self.d_output = d_output
+        self.half_dim = d_model // 2
+
+        # Ramo di attivazione (legge la prima metà)
+        self.expand_k = nn.Linear(self.half_dim, M, bias=False)
+
+        # Ramo di gating (legge la seconda metà)
+        self.expand_g = nn.Linear(d_model - self.half_dim, M, bias=False)
+
+        # Proiezione finale
+        self.contract = nn.Linear(M, d_output, bias=False)
+
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        x_left = x[..., :self.half_dim]
+        x_right = x[..., self.half_dim:]
+
+        hk = self.expand_k(x_left)
+        hg = self.expand_g(x_right)
+
+        h = self.dropout(self.activation(hk) * hg)
+
+        out = self.contract(h)
+
+        return out
+
+
+class DoubleUDLP(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.expand = DoubleLinear(d_model, M)
+        self.contract = nn.Linear(M, d_output)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x))))
+
+
+class M_UDLP(Layer):
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
+        super().__init__()
+        self.in_proj = nn.Linear(d_model, d_model)
+        self.expand = nn.Linear(d_model, M)
+        self.contract = nn.Linear(M, d_output)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
 
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))
@@ -590,7 +893,7 @@ class F_UDLPSwiGLU(Layer):
         self.contract = nn.Linear(d_model * expand, d_model, bias=False)
         self.LoRA_expand = LowRankLinear(d_model, expand * d_model * 2, lora_rank)
         self.LoRA_contract = LowRankLinear(d_model * expand, d_model, lora_rank)
-        self.scale = 1/lora_rank*2
+        self.scale = 1 / lora_rank * 2
         self.finetuning = False
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
@@ -599,9 +902,9 @@ class F_UDLPSwiGLU(Layer):
         if not self.finetuning:
             return self.dropout(self.contract(self.activation(self.expand(x))))
         else:
-            act = self.activation(self.expand(x) + self.LoRA_expand(x)*self.scale)
+            act = self.activation(self.expand(x) + self.LoRA_expand(x) * self.scale)
             return self.dropout(
-                self.contract(act) + self.LoRA_contract(act)*self.scale
+                self.contract(act) + self.LoRA_contract(act) * self.scale
             )
 
     def finetune(self):
@@ -674,7 +977,7 @@ class ConvResBlock(Layer):
         return self.convout(x)
 
 
-class RMSNorm(nn.Module):  # Assumo Layer erediti da nn.Module
+class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -706,3 +1009,79 @@ class EMA:
         for name, param in model.named_parameters():
             if param.requires_grad:
                 param.data.copy_(self.shadow[name])
+
+
+class Nova(Layer):
+    def __init__(self):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor([0.7]))
+
+    def forward(self, x):
+        h = -self.beta * x
+        return x * (torch.sigmoid(-h) - (1 / (1 + h ** 2)))
+
+
+class MinusNova(Layer):
+    def __init__(self):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor([0.7]))
+
+    def forward(self, x):
+        h = -self.beta * -x
+        return x * (torch.sigmoid(-h) - (1 / (1 + h ** 2)))
+
+
+class TaylorAct(nn.Module):
+    def __init__(self, order=3):
+        super().__init__()
+        self.order = order
+        self.coeffs = nn.Parameter(torch.randn(order + 1) * 0.02)
+
+    def forward(self, x):
+        device = x.device
+        exponents = torch.arange(self.order + 1, device=device, dtype=x.dtype)
+        x_pow = x.unsqueeze(-1).pow(exponents)
+
+        return torch.matmul(x_pow, self.coeffs)
+
+    def plot(self, bounds=(-4, 4), n_points=200):
+        x = torch.linspace(bounds[0], bounds[1], n_points)
+        with torch.no_grad():
+            y = self.forward(x)
+
+        plt.figure(figsize=(7, 4))
+        plt.plot(x.numpy(), y.numpy(), label='TaylorAct', color='royalblue')
+        plt.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+        plt.axvline(0, color='gray', linewidth=0.8, linestyle='--')
+        plt.title('TaylorAct Activation Function')
+        plt.xlabel('x')
+        plt.ylabel('f(x)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+
+class FastPoly3(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.a0 = nn.Parameter(torch.zeros(d_model))
+        self.a1 = nn.Parameter(torch.ones(d_model))
+        self.a2 = nn.Parameter(torch.zeros(d_model))
+        self.a3 = nn.Parameter(torch.zeros(d_model))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.a0 + x * (self.a1 + x * (self.a2 + x * self.a3))
+
+
+class CastedLinear(nn.Linear):
+    def forward(self, x: Tensor) -> Tensor:
+        bias = self.bias.to(x.dtype) if self.bias is not None else None
+        return F.linear(x, self.weight.to(x.dtype), bias)
+
+
+if __name__ == '__main__':
+    act = TaylorAct()
+    act.plot()  # default -4, 4
+    act.plot(bounds=(-1, 1))  # custom bounds
+    act.plot(bounds=(0, 1), n_points=100)
