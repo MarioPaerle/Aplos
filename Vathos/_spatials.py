@@ -371,7 +371,7 @@ class MultiheadAttentionMixer(Layer):
         out = self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
         return out, attn_weights
 
-    def generate(self, x: torch.Tensor) -> torch.Tensor:
+    def generate(self, x: torch.Tensor, ve=None) -> torch.Tensor:
         B, L, D = x.shape
 
         qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
@@ -386,6 +386,9 @@ class MultiheadAttentionMixer(Layer):
 
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=pos_offset)
+
+        if ve is not None:
+            v = v + ve.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
 
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
@@ -1133,7 +1136,7 @@ class GroupedQueryAttention(Layer):
         )
         return self.o_proj(attn.transpose(1, 2).contiguous().view(B, T, C))
 
-    def generate(self, x: torch.Tensor) -> torch.Tensor:
+    def generate(self, x: torch.Tensor, ve=None) -> torch.Tensor:
         B, T, C = x.shape
 
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
@@ -1150,6 +1153,12 @@ class GroupedQueryAttention(Layer):
 
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=pos_offset)
+
+        if ve is not None:
+            raise NotImplementedError(
+                "GroupedQueryAttention.forward does not support value embeddings; "
+                "use MultiheadAttentionMixer if you need ve."
+            )
 
         if self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache

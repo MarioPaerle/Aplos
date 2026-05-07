@@ -514,6 +514,19 @@ class ReLU2(Layer):
         return x_pos * x_pos
 
 
+class LeakyReLU2(Layer):
+    gated = False
+    __name__ = "LeakyReLU^2"
+    __complexity__ = "O(L)"
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_pos = F.leaky_relu(x, 0.5)
+        return x_pos * x_pos
+
+
 class PSiLU2(Layer):
     gated = False
     __name__ = "SiLU^2"
@@ -725,21 +738,6 @@ class UDLPSwiGLU(Layer):
         self.contract = nn.Linear(d_model * expand, d_model, bias=False)
         self.activation = SwiGLU()
         self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        return self.dropout(self.contract(self.activation(self.expand(x))))
-
-
-class VariableUDLP(Layer):
-    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
-        super().__init__()
-        self.expand = nn.Linear(d_model, M, bias=False)
-        self.contract = nn.Linear(M, d_output, bias=False)
-        self.activation = activation()
-        self.dropout = nn.Dropout(dropout)
-
-    def _init_weights(self):
-        torch.nn.init.zeros_(self.contract.weight)
 
     def forward(self, x):
         return self.dropout(self.contract(self.activation(self.expand(x))))

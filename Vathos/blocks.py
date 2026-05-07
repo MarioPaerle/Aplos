@@ -33,12 +33,13 @@ class Block1d(Layer):
         x = x + self.channel_mixer(self.norm2(x))
         return x
 
-    def generate(self, x: torch.Tensor):
-        # Use generate if available, otherwise forward
+    def generate(self, x: torch.Tensor, ve=None):
+        h = self.norm1(x)
         if self.spatial_mixer.has_custom_generate():
-            x = x + self.spatial_mixer.generate(self.norm1(x))
+            spatial_out = _call_with_ve(self.spatial_mixer.generate, h, ve)
         else:
-            x = x + self.spatial_mixer(self.norm1(x))
+            spatial_out = _call_with_ve(self.spatial_mixer, h, ve)
+        x = x + spatial_out
 
         if self.channel_mixer.has_custom_generate():
             x = x + self.channel_mixer.generate(self.norm2(x))
@@ -46,6 +47,17 @@ class Block1d(Layer):
             x = x + self.channel_mixer(self.norm2(x))
 
         return x
+
+
+def _call_with_ve(fn, h, ve):
+    """Call fn(h, ve=ve) if it accepts ve, otherwise fn(h). Used by Block.generate
+    so that spatial mixers without ve support stay drop-in."""
+    if ve is None:
+        return fn(h)
+    try:
+        return fn(h, ve=ve)
+    except TypeError:
+        return fn(h)
 
 
 class CBlock1d(Layer):
@@ -65,15 +77,17 @@ class CBlock1d(Layer):
         x = x * self.l[2] + self.channel_mixer(self.norm2(x)) * self.l[3]
         return x
 
-    def generate(self, x: torch.Tensor):
+    def generate(self, x: torch.Tensor, ve=None):
+        h = self.norm1(x)
         if self.spatial_mixer.has_custom_generate():
-            x = x + self.spatial_mixer.generate(self.norm1(x))
+            spatial_out = _call_with_ve(self.spatial_mixer.generate, h, ve)
         else:
-            x = x + self.spatial_mixer(self.norm1(x))
+            spatial_out = _call_with_ve(self.spatial_mixer, h, ve)
+        x = x * self.l[0] + spatial_out * self.l[1]
         if self.channel_mixer.has_custom_generate():
-            x = x + self.channel_mixer.generate(self.norm2(x))
+            x = x * self.l[2] + self.channel_mixer.generate(self.norm2(x)) * self.l[3]
         else:
-            x = x + self.channel_mixer(self.norm2(x))
+            x = x * self.l[2] + self.channel_mixer(self.norm2(x)) * self.l[3]
         return x
 
 
@@ -119,10 +133,12 @@ class JBlock1d(Layer):
             return x + self.spatial_mixer(h, ve) + self.channel_mixer(h)
         return x + self.spatial_mixer(h) + self.channel_mixer(h)
 
-    def generate(self, x: torch.Tensor):
+    def generate(self, x: torch.Tensor, ve=None):
         h = self.norm(x)
-        spatial_out = self.spatial_mixer.generate(h) if (hasattr(self.spatial_mixer, 'has_custom_generate') and self.spatial_mixer.has_custom_generate()) else self.spatial_mixer(h)
-        channel_out = self.channel_mixer.generate(h) if (hasattr(self.channel_mixer, 'has_custom_generate') and self.channel_mixer.has_custom_generate()) else self.channel_mixer(h)
+        sm_fn = self.spatial_mixer.generate if (hasattr(self.spatial_mixer, 'has_custom_generate') and self.spatial_mixer.has_custom_generate()) else self.spatial_mixer
+        cm_fn = self.channel_mixer.generate if (hasattr(self.channel_mixer, 'has_custom_generate') and self.channel_mixer.has_custom_generate()) else self.channel_mixer
+        spatial_out = _call_with_ve(sm_fn, h, ve)
+        channel_out = cm_fn(h)
         return x + spatial_out + channel_out
 
 
@@ -1299,6 +1315,127 @@ class ModdedFormer(VathosModel):
 
         x = self.unembedder(self.final_norm(x))
         return x
+
+    @torch.no_grad()
+    def _clear_all_caches(self):
+        for block in self.blocks:
+            for module in block.modules():
+                if hasattr(module, 'clear_cache'):
+                    module.clear_cache()
+
+    def _embed_input(self, ids: torch.Tensor, pos_start: int) -> torch.Tensor:
+        x0 = self.embedder(ids)
+        if self.learnable_pe:
+            L = ids.size(1)
+            x0 = x0 + self.pos_emb[:, pos_start:pos_start + L, :]
+        if self.smear_gate:
+            x0 = self.smear_gate(x0)
+        return x0
+
+    def _blocks_generate(self, x: torch.Tensor, x0: torch.Tensor,
+                        xs, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Mirror of forward()'s block loop, but calls block.generate(...) so
+        that attention mixers populate / consume their KV cache.
+        Works for both prefill (L>1) and single-token increments (L=1).
+        """
+        active_skips = {}
+        for i, block in enumerate(self.blocks):
+            ve = None
+            if self.value_embeddings_cfg is not None and self.value_embeddings_cfg[i] is not None:
+                group_id = self.value_embeddings_cfg[i]
+                ve = self.ve_embeddings[str(group_id)](input_ids)
+                ve = self._apply_ve_weight(ve, x, i)
+
+            if self.zeroskip and self.input_projections > 0:
+                proj_params = self.inputs_projection_params[
+                    i * self.input_projections: (i + 1) * self.input_projections
+                ]
+                x = block.generate(x, ve=ve) + x0 * self.zeroskip_params[i] + sum(
+                    [xj * p for xj, p in zip(xs, proj_params)]
+                )
+            elif self.zeroskip:
+                x = block.generate(x, ve=ve) + x0 * self.zeroskip_params[i]
+            else:
+                x = block.generate(x, ve=ve)
+
+            for source_idx, target_idx in enumerate(self.skips):
+                if target_idx == i:
+                    gate = self.skip_lambdas[f"route_{source_idx}_to_{target_idx}"]
+                    x = x + gate * active_skips[source_idx]
+                    del active_skips[source_idx]
+
+            if self.skips[i] is not None:
+                active_skips[i] = x
+        return x
+
+    @torch.no_grad()
+    def generate(self, prompt: torch.Tensor, max_len: int = 100,
+                 temperature: float = 1.0, top_k: int | None = None,
+                 top_p: float = 1.0, repetition_penalty: float = 1.0,
+                 token_end=None, simple: bool = False):
+        """
+        KV-cached AR generation. Prefills the prompt in one shot (every spatial
+        mixer's .generate accepts L>1 and populates its kv_cache), then walks
+        token-by-token reusing the cached keys/values.
+
+        simple=True falls back to simple_ar_generate (O(L^2)) — useful for
+        regression-checking the cached path.
+        """
+        if simple:
+            return simple_ar_generate(
+                self, prompt, max_len=max_len, temperature=temperature,
+                top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+                token_end=token_end,
+            )
+
+        self.eval()
+        self._clear_all_caches()
+
+        if self.value_embeddings_cfg is not None:
+            flag("ModdedFormer.generate: value_embeddings only work with spatial mixers "
+                 "whose .generate accepts a 've=' kwarg (e.g. MultiheadAttentionMixer). "
+                 "On other mixers ve is silently dropped during generation.", 2)
+
+        if prompt.dim() == 1:
+            prompt = prompt.unsqueeze(0)
+        device = next(self.parameters()).device
+        prompt = prompt.to(device)
+
+        L = prompt.size(1)
+        x0 = self._embed_input(prompt, pos_start=0)
+        xs = (self.inputs_projection_linears(x0).chunk(self.input_projections, dim=-1)
+              if self.input_projections > 0 else None)
+
+        x = self._blocks_generate(x0, x0, xs, prompt)
+        logits = self.unembedder(self.final_norm(x))[:, -1, :]
+
+        if repetition_penalty != 1.0:
+            logits = apply_repetition_penalty(logits, prompt, repetition_penalty)
+        next_token = sample_next_token(logits, temperature, top_k, top_p)
+        generated = torch.cat([prompt, next_token], dim=1)
+
+        pos = L
+        pbar = tqdm(range(max_len - 1), desc="ModdedFormer fast gen")
+        for _ in pbar:
+            x0_t = self._embed_input(next_token, pos_start=pos)
+            xs_t = (self.inputs_projection_linears(x0_t).chunk(self.input_projections, dim=-1)
+                    if self.input_projections > 0 else None)
+
+            x_t = self._blocks_generate(x0_t, x0_t, xs_t, next_token)
+            logits = self.unembedder(self.final_norm(x_t))[:, -1, :]
+
+            if repetition_penalty != 1.0:
+                logits = apply_repetition_penalty(logits, generated, repetition_penalty)
+            next_token = sample_next_token(logits, temperature, top_k, top_p)
+            generated = torch.cat([generated, next_token], dim=1)
+            pos += 1
+
+            if token_end is not None and (next_token == token_end).all():
+                break
+
+        self._clear_all_caches()
+        return generated
 
     def _init_weights(self):
         std_embed = 0.02

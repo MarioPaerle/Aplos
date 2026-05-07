@@ -283,6 +283,88 @@ def benchmark_ar_symbolic_model(model, n, input_shape):
     plt.show()
 
 
+def apply_repetition_penalty(logits: torch.Tensor, generated: torch.Tensor,
+                             penalty: float) -> torch.Tensor:
+    """
+    Standard HF-style repetition penalty, vectorized.
+    logits:    [B, V]   (last-position logits)
+    generated: [B, L]   (token ids generated so far, including prompt)
+    Divides logits>0 by penalty, multiplies logits<=0 by penalty, in-place-safe.
+    """
+    if penalty == 1.0:
+        return logits
+    score = torch.gather(logits, 1, generated)
+    score = torch.where(score > 0, score / penalty, score * penalty)
+    logits = logits.scatter(1, generated, score)
+    return logits
+
+
+def sample_next_token(logits: torch.Tensor, temperature: float = 1.0,
+                      top_k: int | None = None, top_p: float = 1.0) -> torch.Tensor:
+    """
+    Sample one token per row from [B, V] logits with temperature, top-k, top-p.
+    Returns [B, 1] long tensor.
+    """
+    logits = logits / max(temperature, 1e-8)
+
+    if top_k is not None and top_k > 0:
+        k = min(top_k, logits.size(-1))
+        v, _ = torch.topk(logits, k)
+        logits = logits.masked_fill(logits < v[:, [-1]], float('-inf'))
+
+    if top_p < 1.0:
+        sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+        cum = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        remove = cum > top_p
+        remove[..., 1:] = remove[..., :-1].clone()
+        remove[..., 0] = 0
+        mask = remove.scatter(1, sorted_idx, remove)
+        logits = logits.masked_fill(mask, float('-inf'))
+
+    probs = F.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
+@torch.no_grad()
+def simple_ar_generate(model, prompt, max_len=100, temperature=1.0,
+                       top_k=None, top_p=1.0, repetition_penalty=1.0,
+                       token_end=None, verbose=False):
+    """
+    Dumb autoregressive generation for debugging.
+
+    Runs a full forward pass on the whole sequence each step, takes logits at the
+    last position, samples, appends. O(L^2) total — useless for big models, but it
+    works on *anything* whose forward(ids) returns [B, L, V] logits, with no
+    assumptions about KV caches, custom generate(), pos encoders, ve, skips, etc.
+    Good as a ground-truth reference when debugging more sophisticated generators.
+    """
+    flag("simple_ar_generate is O(L^2) and ignores KV caches: use it for debugging, "
+         "not for real inference. If your model has a fast .generate(), prefer that.", 2)
+    model.eval()
+    if prompt.dim() == 1:
+        prompt = prompt.unsqueeze(0)
+    device = next(model.parameters()).device
+    generated = prompt.clone().to(device)
+
+    for _ in range(max_len):
+        logits = model(generated)
+        next_logits = logits[:, -1, :]
+
+        if repetition_penalty != 1.0:
+            next_logits = apply_repetition_penalty(next_logits, generated, repetition_penalty)
+
+        next_token = sample_next_token(next_logits, temperature, top_k, top_p)
+        generated = torch.cat([generated, next_token], dim=1)
+
+        if verbose:
+            print(next_token.flatten().tolist())
+
+        if token_end is not None and (next_token == token_end).all():
+            break
+
+    return generated
+
+
 def toeplitz_init(tensor: torch.Tensor, alpha: float, causal: bool = True, mul=0.1):
     """
     Initializes a square 2D tensor to a custom Toeplitz matrix with decaying kernels
