@@ -1829,6 +1829,7 @@ class PiCOFormer(VathosModel):
     def __init__(self, vocab_size: int, d_model: int, n_layers: int,
                  spatials, channel=None, norm=RMSNorm,
                  ve_groups=None, smear_gate: nn.Module = None,
+                 smear_gate_lookback: int = 0,
                  logit_softcap: float = 30.0, tied_embeddings: bool = True):
         super().__init__()
         self.vocab_size = vocab_size
@@ -1878,8 +1879,15 @@ class PiCOFormer(VathosModel):
             for i in range(n_layers)
         ])
 
-        # Smear gate opzionale (deve essere un nn.Module che mappa [B,L,D] -> [B,L,D])
+        # Smear gate opzionale (nn.Module [B,L,D] -> [B,L,D]).
+        # smear_gate_lookback: 0 = stateless (per-token pointwise) — il fast path
+        # generate() lo applica al singolo token. Se >0, il fast path mantiene una
+        # rolling window di `lookback` token raw embeddings e ricomputa smear su
+        # `window + new_token` (necessario per conv causali kernel>1, RNN, ecc.).
         self.smear_gate = smear_gate
+        self._smear_lookback = int(smear_gate_lookback)
+        self._x_window = None
+        self._smear_gate_warned = False
 
         self._init_weights()
 
@@ -1927,6 +1935,7 @@ class PiCOFormer(VathosModel):
             for mod in block.modules():
                 if hasattr(mod, "clear_cache"):
                     mod.clear_cache()
+        self._x_window = None
 
     @torch.no_grad()
     def generate(self, prompt: torch.Tensor, max_len: int = 100,
@@ -1944,15 +1953,35 @@ class PiCOFormer(VathosModel):
         self.eval()
         self._clear_caches()
 
+        # Warning una tantum se smear_gate è non-trivial ma lookback=0
+        if (self.smear_gate is not None
+                and not isinstance(self.smear_gate, nn.Identity)
+                and self._smear_lookback == 0
+                and not self._smear_gate_warned):
+            import warnings
+            warnings.warn(
+                "PiCOFormer.generate(simple=False): smear_gate non-Identity con "
+                "smear_gate_lookback=0. Se il modulo ha state temporale (conv "
+                "kernel>1, RNN, ecc.), il fast path divergerà da simple=True. "
+                "Setta smear_gate_lookback=<receptive_field-1> o usa simple=True.",
+                RuntimeWarning, stacklevel=2,
+            )
+            self._smear_gate_warned = True
+
         if prompt.dim() == 1:
             prompt = prompt.unsqueeze(0)
         device = next(self.parameters()).device
         prompt = prompt.to(device)
 
         # --- Prefill --------------------------------------------------------
-        x0 = self.embedder(prompt)
+        x0_raw = self.embedder(prompt)
         if self.smear_gate is not None:
-            x0 = self.smear_gate(x0)
+            x0 = self.smear_gate(x0_raw)
+            if self._smear_lookback > 0:
+                # Salva ultimi `lookback` raw embeddings come window (esclude i nuovi)
+                self._x_window = x0_raw[:, -self._smear_lookback:, :].clone()
+        else:
+            x0 = x0_raw
         ves = self._compute_ves(prompt)
         x = x0
         for i, block in enumerate(self.blocks):
@@ -1968,9 +1997,19 @@ class PiCOFormer(VathosModel):
         # --- Step-by-step ---------------------------------------------------
         pbar = tqdm(range(max_len - 1), desc="PiCOFormer fast gen")
         for _ in pbar:
-            x0_t = self.embedder(next_token)
+            x0_t_raw = self.embedder(next_token)
             if self.smear_gate is not None:
-                x0_t = self.smear_gate(x0_t)
+                if self._smear_lookback > 0:
+                    # combina window + new, applica smear, prendi ultimo token
+                    combined = torch.cat([self._x_window, x0_t_raw], dim=1)
+                    smeared = self.smear_gate(combined)
+                    x0_t = smeared[:, -1:, :]
+                    # aggiorna window: tieni gli ultimi `lookback` raw embeddings
+                    self._x_window = combined[:, -self._smear_lookback:, :]
+                else:
+                    x0_t = self.smear_gate(x0_t_raw)
+            else:
+                x0_t = x0_t_raw
             ves_t = self._compute_ves(next_token)
             x_t = x0_t
             for i, block in enumerate(self.blocks):
