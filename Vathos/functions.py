@@ -1,8 +1,15 @@
 import torch
-import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import time
 import numpy as np
+
+# matplotlib è usato solo dalle utility di plot/benchmark, non dal codice del modello.
+# Lazy + optional import per non rompere l'import di Vathos in ambienti headless.
+try:
+    import matplotlib.pyplot as plt
+    plt.style.use('ggplot')
+except ImportError:
+    plt = None  # le funzioni di plot solleveranno errore esplicito se chiamate
 
 try:
     from colorama import Fore
@@ -23,10 +30,17 @@ except:
 
 FLAG_PASS = 3
 
-plt.style.use('ggplot')
+
+def _require_matplotlib():
+    if plt is None:
+        raise ImportError(
+            "Funzione di plotting chiamata ma matplotlib non è installato. "
+            "Installa con `pip install matplotlib` per usarla."
+        )
 
 
 def plot(*args, **kwargs):
+    _require_matplotlib()
     for x_i in args:
         plt.plot(x_i)
     for x_i in kwargs:
