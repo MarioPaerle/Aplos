@@ -770,11 +770,11 @@ class VathosModel(Layer):
 
     def train(self, *args, **kwargs):
         self.finetuning = False
-        super().train(*args, **kwargs)
+        return super().train(*args, **kwargs)
 
     def eval(self):
         self.finetuning = False
-        super().eval()
+        return super().eval()
 
 
 ########################################################################################################################

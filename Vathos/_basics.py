@@ -71,6 +71,12 @@ z            return self.lin(x)
     DO NOT override __call__. Profiling is handled via native forward hooks,
     which are registered automatically in debug mode and completely absent
     in production mode — zero overhead, full torch.compile compatibility.
+
+    IMPORTANT: gli hook sono registrati al __init__. Se il modello è costruito
+    PRIMA di chiamare set_vathos_mode('production'), gli hook sopravvivono.
+    Soluzioni:
+      1) Chiama set_vathos_mode('production') PRIMA di istanziare moduli.
+      2) Oppure chiama model.strip_profiling_hooks() dopo lo switch.
     """
 
     _is_vathos_layer = True
@@ -155,6 +161,18 @@ z            return self.lin(x)
 
     def get_mean_execution_time(self) -> float:
         return float(np.mean(self._times)) if self._times else 0.0
+
+    def strip_profiling_hooks(self):
+        """Rimuove gli hook profile da questo modulo e da tutti i sotto-Layer.
+
+        Utile se il modello è stato istanziato in debug mode e poi si vuole
+        passare a production senza ricostruirlo. Idempotente.
+        """
+        for module in self.modules():
+            if isinstance(module, Layer):
+                module._forward_pre_hooks.clear()
+                module._forward_hooks.clear()
+        return self
 
     def has_custom_generate(self) -> bool:
         return type(self).generate is not Layer.generate
