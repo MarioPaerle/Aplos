@@ -1238,6 +1238,9 @@ class ModdedFormer(VathosModel):
         self.ve_gate_dim = ve_gate_dim if ve_gate_dim is not None else embed_dim
         self.value_embeddings_cfg = value_embeddings
 
+        # Value embeddings: ModuleDict/ParameterDict come prima (per leggibilità + checkpoint legacy),
+        # MA in più costruiamo strutture INDEXED-BY-LAYER per il forward (no str() runtime, no dict
+        # lookup → compile-friendly).
         if value_embeddings is not None:
             assert len(value_embeddings) == n_layers, "value_embeddings length must equal n_layers"
             unique_groups = sorted(set(v for v in value_embeddings if v is not None))
@@ -1255,8 +1258,64 @@ class ModdedFormer(VathosModel):
                     str(i): nn.Linear(self.ve_gate_dim, embed_dim, bias=False)
                     for i, v in enumerate(value_embeddings) if v is not None
                 })
+
+            # Strutture parallele indexed-by-layer per il forward (riferiscono gli stessi param).
+            self._ve_per_layer = nn.ModuleList([
+                self.ve_embeddings[str(v)] if v is not None else nn.Identity()
+                for v in value_embeddings
+            ])
+            self._has_ve_per_layer = tuple(v is not None for v in value_embeddings)
+            self._has_any_ve = any(self._has_ve_per_layer)
+
+            if ve_type == 'scalar':
+                self._ve_scale_per_layer = nn.ParameterList([
+                    self.ve_scales[str(i)] if value_embeddings[i] is not None
+                    else nn.Parameter(torch.zeros(1), requires_grad=False)
+                    for i in range(n_layers)
+                ])
+                self._ve_gate_per_layer = nn.ModuleList([nn.Identity() for _ in range(n_layers)])
+            else:
+                self._ve_scale_per_layer = nn.ParameterList([
+                    nn.Parameter(torch.zeros(1), requires_grad=False) for _ in range(n_layers)
+                ])
+                self._ve_gate_per_layer = nn.ModuleList([
+                    self.ve_gates[str(i)] if value_embeddings[i] is not None else nn.Identity()
+                    for i in range(n_layers)
+                ])
         else:
             self.ve_embeddings = nn.ModuleDict()
+            self._has_ve_per_layer = tuple([False] * n_layers)
+            self._has_any_ve = False
+            self._ve_per_layer = nn.ModuleList([nn.Identity() for _ in range(n_layers)])
+            self._ve_scale_per_layer = nn.ParameterList()
+            self._ve_gate_per_layer = nn.ModuleList()
+
+        # ---------------------------------------------------------------------
+        # Skip routing: pre-computed plan + ParameterList (no string keys, no dict mutato)
+        # ---------------------------------------------------------------------
+        # Per ogni layer i:
+        #   - _skip_save[i]: bool, se salvare l'output come sorgente di skip
+        #   - _skip_consume_at[i]: tuple di (source_idx, gate_idx_in_list) da consumare qui
+        self._skip_save = tuple(s is not None for s in self.skips)
+        consume_lists = [[] for _ in range(n_layers)]
+        gate_param_count = 0
+        # Mapping (source, target) -> gate index nella ParameterList
+        self._skip_gate_map = {}
+        for source_idx, target_idx in enumerate(self.skips):
+            if target_idx is not None:
+                self._skip_gate_map[(source_idx, target_idx)] = gate_param_count
+                consume_lists[target_idx].append((source_idx, gate_param_count))
+                gate_param_count += 1
+        self._skip_consume_at = tuple(tuple(lst) for lst in consume_lists)
+        self._has_any_skip = gate_param_count > 0
+        # ParameterList parallela: stessi tensori della ParameterDict legacy, indicizzati posizionalmente.
+        if self._has_any_skip:
+            self._skip_gates_list = nn.ParameterList([
+                self.skip_lambdas[f"route_{s}_to_{t}"]
+                for (s, t), _ in sorted(self._skip_gate_map.items(), key=lambda kv: kv[1])
+            ])
+        else:
+            self._skip_gates_list = nn.ParameterList()
 
         self.learnable_pe = learnable_pe
         if self.learnable_pe:
@@ -1265,56 +1324,90 @@ class ModdedFormer(VathosModel):
         self.final_norm = RMSNorm(d_models[-1])
         self._init_weights()
 
+        # Flag globale fast-path: nessuna feature opzionale → loop pulito senza branch.
+        self._has_any_zeroskip = bool(zeroskip)
+        self._has_input_projections = int(input_projections) > 0
+        self._has_smear_gate = bool(smear_gate)
+        self._has_learnable_pe = bool(learnable_pe)
+        self._fast_path = not any([
+            self._has_any_ve, self._has_any_skip,
+            self._has_any_zeroskip, self._has_input_projections,
+            self._has_smear_gate, self._has_learnable_pe,
+        ])
+
     def _apply_ve_weight(self, ve: torch.Tensor, x: torch.Tensor, layer_idx: int) -> torch.Tensor:
+        """Legacy helper (mantenuto per backward compat). Il forward usa la versione indicizzata."""
         if self.ve_type == 'scalar':
             return ve * self.ve_scales[str(layer_idx)]
-        else:  # gate: nanogpt-style, 2*sigmoid(linear(x)) elementwise on ve
+        else:
             gate = 2.0 * torch.sigmoid(self.ve_gates[str(layer_idx)](x[..., :self.ve_gate_dim]))
             return ve * gate
 
+    def _compute_ve_indexed(self, input_ids: torch.Tensor, x: torch.Tensor, i: int):
+        """Versione fast: ModuleList[i] invece di ModuleDict[str(group_id)]."""
+        ve = self._ve_per_layer[i](input_ids)
+        if self.ve_type == 'scalar':
+            return ve * self._ve_scale_per_layer[i]
+        # gate type
+        return ve * (2.0 * torch.sigmoid(self._ve_gate_per_layer[i](x[..., :self.ve_gate_dim])))
+
+    # -------------------------------------------------------------------------
+    # Forward — fast path se niente feature opzionali, slow path altrimenti
+    # -------------------------------------------------------------------------
+
     def forward(self, x):
-        input_ids = x
-        seq_len = x.size(1)
+        # FAST PATH: standard transformer pretrain, no skip / no VE / no zeroskip / no PE / no smear.
+        # È il caso di gran lunga più comune (es. PiCO 2 / Guido-1 baseline).
+        if self._fast_path:
+            x = self.embedder(x)
+            for block in self.blocks:
+                x = block(x)
+            return self.unembedder(self.final_norm(x))
+
+        # SLOW PATH: include tutte le feature opzionali. Anche qui niente string keys / dict mutati:
+        # le strutture sono pre-computate al __init__ e indexed-by-layer.
+        input_ids = x  # alias per VE lookup
 
         x0 = self.embedder(x)
-
-        if self.input_projections > 0:
+        if self._has_input_projections:
             xs = self.inputs_projection_linears(x0).chunk(self.input_projections, dim=-1)
-
-        if self.learnable_pe:
-            x0 = x0 + self.pos_emb[:, :seq_len, :]
-
-        if self.smear_gate:
+        if self._has_learnable_pe:
+            x0 = x0 + self.pos_emb[:, :x.size(1), :]
+        if self._has_smear_gate:
             x0 = self.smear_gate(x0)
 
         x = x0
-
-        active_skips = {}
+        # Buffer di skip: lista Python di lunghezza fissa = n_layers. Allocata solo se serve.
+        skip_buffer = [None] * self.n_layer if self._has_any_skip else None
 
         for i, block in enumerate(self.blocks):
+            # VE — indexed lookup (no string)
             ve = None
-            if self.value_embeddings_cfg is not None and self.value_embeddings_cfg[i] is not None:
-                group_id = self.value_embeddings_cfg[i]
-                ve = self.ve_embeddings[str(group_id)](input_ids)
-                ve = self._apply_ve_weight(ve, x, i)
-            if self.zeroskip and self.input_projections > 0:
-                x = block(x, ve=ve) + x0 * self.zeroskip_params[i] + sum([x * p for x, p in zip(xs,self.inputs_projection_params[i * self.input_projections: (i + 1) * self.input_projections])])
-            elif self.zeroskip:
+            if self._has_ve_per_layer[i]:
+                ve = self._compute_ve_indexed(input_ids, x, i)
+
+            # Block forward + zeroskip variants
+            if self._has_any_zeroskip and self._has_input_projections:
+                proj_params = self.inputs_projection_params[
+                    i * self.input_projections: (i + 1) * self.input_projections
+                ]
+                x = block(x, ve=ve) + x0 * self.zeroskip_params[i] + sum(
+                    [xj * p for xj, p in zip(xs, proj_params)]
+                )
+            elif self._has_any_zeroskip:
                 x = block(x, ve=ve) + x0 * self.zeroskip_params[i]
             else:
                 x = block(x, ve=ve)
 
-            for source_idx, target_idx in enumerate(self.skips):
-                if target_idx == i:
-                    gate = self.skip_lambdas[f"route_{source_idx}_to_{target_idx}"]
-                    x = x + gate * active_skips[source_idx]
-                    del active_skips[source_idx]
+            # Skip routing — pre-computed plan, indexed gates (no dict, no string)
+            if self._has_any_skip:
+                consume = self._skip_consume_at[i]
+                for source_idx, gate_idx in consume:
+                    x = x + self._skip_gates_list[gate_idx] * skip_buffer[source_idx]
+                if self._skip_save[i]:
+                    skip_buffer[i] = x
 
-            if self.skips[i] is not None:
-                active_skips[i] = x
-
-        x = self.unembedder(self.final_norm(x))
-        return x
+        return self.unembedder(self.final_norm(x))
 
     @torch.no_grad()
     def _clear_all_caches(self):
