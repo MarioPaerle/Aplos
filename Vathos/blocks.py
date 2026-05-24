@@ -1715,6 +1715,280 @@ Attention = MultiheadAttentionMixer
 AttentionNOV = MultiheadAttentionMixerNOV
 NOVLa2 = MultiheadAttentionMixerNOVLa2
 
+
+# =============================================================================
+# HIGH-LEVEL MODELS
+# =============================================================================
+#
+# Modelli pronti all'uso, ottimizzati per training/inference efficienti. A
+# differenza di SequenceModel / ModdedFormer (pensati per studio + ablation),
+# qui ogni Python branch è pre-risolto al __init__, niente ParameterDict /
+# ModuleDict string-keyed, niente dict mutati nel forward. Tutto torch.compile-
+# friendly.
+#
+# d_model è fissa su tutti i layer (sceltà per semplicità + compile efficiency).
+# =============================================================================
+
+
+class BlockX0(Layer):
+    """Pre-norm block + x0-skip nativo.
+
+    Forward(x, x0) -> x + spatial(norm1(x)) + channel(norm2(x)) + x0_lambda * x0
+    `x0_lambda` init=0 ⇒ comportamento identico a Block1d al primo step.
+    """
+    __name__ = "BlockX0"
+
+    def __init__(self, d_model: int, channel_mixer: Layer, spatial_mixer: Layer, norm=RMSNorm):
+        super().__init__()
+        self.spatial_mixer = spatial_mixer
+        self.channel_mixer = channel_mixer
+        self.norm1 = norm(d_model)
+        self.norm2 = norm(d_model)
+        self.x0_lambda = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
+        x = x + self.spatial_mixer(self.norm1(x))
+        x = x + self.channel_mixer(self.norm2(x))
+        return x + self.x0_lambda * x0
+
+    def generate(self, x: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
+        h = self.norm1(x)
+        sm = self.spatial_mixer
+        x = x + (sm.generate(h) if sm.has_custom_generate() else sm(h))
+        h = self.norm2(x)
+        cm = self.channel_mixer
+        x = x + (cm.generate(h) if cm.has_custom_generate() else cm(h))
+        return x + self.x0_lambda * x0
+
+
+class PiCOBlock(BlockX0):
+    """BlockX0 + value-embedding nativo (off di default, zero costo se off).
+
+    Quando `ve_enabled=True`, forward accetta un tensor `ve` esterno e lo passa
+    al spatial_mixer pre-scalato per `ve_scale` (Parameter init=0 ⇒ no-op iniziale).
+    """
+    __name__ = "PiCOBlock"
+
+    def __init__(self, d_model: int, channel_mixer: Layer, spatial_mixer: Layer,
+                 norm=RMSNorm, ve_enabled: bool = False):
+        super().__init__(d_model, channel_mixer, spatial_mixer, norm)
+        self.ve_enabled = ve_enabled
+        if ve_enabled:
+            self.ve_scale = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor, x0: torch.Tensor, ve: torch.Tensor = None) -> torch.Tensor:
+        if self.ve_enabled and ve is not None:
+            x = x + self.spatial_mixer(self.norm1(x), ve=ve * self.ve_scale)
+        else:
+            x = x + self.spatial_mixer(self.norm1(x))
+        x = x + self.channel_mixer(self.norm2(x))
+        return x + self.x0_lambda * x0
+
+    def generate(self, x: torch.Tensor, x0: torch.Tensor, ve: torch.Tensor = None) -> torch.Tensor:
+        h = self.norm1(x)
+        sm = self.spatial_mixer
+        if self.ve_enabled and ve is not None:
+            scaled = ve * self.ve_scale
+            x = x + (sm.generate(h, ve=scaled) if sm.has_custom_generate() else sm(h, ve=scaled))
+        else:
+            x = x + (sm.generate(h) if sm.has_custom_generate() else sm(h))
+        h = self.norm2(x)
+        cm = self.channel_mixer
+        x = x + (cm.generate(h) if cm.has_custom_generate() else cm(h))
+        return x + self.x0_lambda * x0
+
+
+class PiCOFormer(VathosModel):
+    """High-level transformer. Ultra-efficient, modular, x0-skip nativo.
+
+    Caratteristiche:
+    - `d_model` fissa su tutti i layer.
+    - Spatial mixers heterogeneous (lista di `Builder`, uno per layer).
+    - x0-skip nativo via `BlockX0` / `PiCOBlock`.
+    - Value embeddings opzionali (zero cost se off, indexed-by-layer).
+    - Smear gate opzionale (Modded-NanoGPT style) su x0.
+    - Final logit softcap.
+    - Tied embeddings di default.
+
+    Args:
+        vocab_size: vocab size.
+        d_model: residual stream dim (fissa).
+        n_layers: numero blocchi.
+        spatials: `Builder` (condiviso) o `List[Builder]` di lunghezza n_layers.
+        channel: `Builder` channel mixer (default VariableUDLP M=4*d_model, ReLU²).
+        norm: classe norm (default RMSNorm).
+        ve_groups: `List[int|None]` di lunghezza n_layers. `None` = no VE su quel layer;
+                   int = id gruppo (gruppi condividono lo stesso `nn.Embedding`).
+                   `None` globalmente = niente VE (default, niente memory cost).
+        smear_gate: `nn.Module` o `None`. Applicato a x0 dopo l'embedding.
+        logit_softcap: softcap finale. 0 disabilita.
+        tied_embeddings: tying input/output embedding (default True).
+    """
+    __name__ = "PiCOFormer"
+
+    def __init__(self, vocab_size: int, d_model: int, n_layers: int,
+                 spatials, channel=None, norm=RMSNorm,
+                 ve_groups=None, smear_gate: nn.Module = None,
+                 logit_softcap: float = 30.0, tied_embeddings: bool = True):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.softcap = logit_softcap
+
+        # Spatials: lista di Builder o Builder singolo (condiviso)
+        spatials_list = spatials if isinstance(spatials, list) else [spatials] * n_layers
+        assert len(spatials_list) == n_layers, "len(spatials) must equal n_layers"
+
+        # Channel default = VariableUDLP, M=4*d_model, ReLU²
+        if channel is None:
+            channel = Builder(VariableUDLP, d_output=d_model, M=4 * d_model, activation=ReLU2)
+
+        # VE: pre-compute embedding condiviso per group + indice per layer
+        self._has_any_ve = ve_groups is not None and any(g is not None for g in ve_groups)
+        if self._has_any_ve:
+            assert len(ve_groups) == n_layers, "len(ve_groups) must equal n_layers"
+            unique_groups = sorted({g for g in ve_groups if g is not None})
+            self.ve_embeddings = nn.ModuleList([nn.Embedding(vocab_size, d_model) for _ in unique_groups])
+            group_to_idx = {g: i for i, g in enumerate(unique_groups)}
+            self._ve_idx_per_layer = tuple(
+                group_to_idx[g] if g is not None else -1 for g in ve_groups
+            )
+        else:
+            self.ve_embeddings = nn.ModuleList()
+            self._ve_idx_per_layer = (-1,) * n_layers
+        self._ve_enabled_per_layer = tuple(idx >= 0 for idx in self._ve_idx_per_layer)
+
+        # Embeddings + final norm + unembedder
+        self.embedder = Embedder(vocab_size, d_model)
+        self.unembedder = UnbiasedLinear(d_model, vocab_size)
+        if tied_embeddings:
+            self.unembedder.linear.weight = self.embedder.embedding.weight
+        self.final_norm = norm(d_model)
+
+        # Blocks
+        self.blocks = nn.ModuleList([
+            PiCOBlock(
+                d_model,
+                channel_mixer=channel(d_model),
+                spatial_mixer=spatials_list[i](d_model),
+                norm=norm,
+                ve_enabled=self._ve_enabled_per_layer[i],
+            )
+            for i in range(n_layers)
+        ])
+
+        # Smear gate opzionale (deve essere un nn.Module che mappa [B,L,D] -> [B,L,D])
+        self.smear_gate = smear_gate
+
+        self._init_weights()
+
+    def _init_weights(self):
+        std_embed = 0.02
+        nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
+        if self.unembedder.linear.weight is not self.embedder.embedding.weight:
+            nn.init.normal_(self.unembedder.linear.weight, mean=0.0, std=std_embed)
+        for emb in self.ve_embeddings:
+            nn.init.normal_(emb.weight, mean=0.0, std=std_embed)
+        for block in self.blocks:
+            if hasattr(block.channel_mixer, "_init_weights"):
+                block.channel_mixer._init_weights()
+            if hasattr(block.spatial_mixer, "_init_weights"):
+                block.spatial_mixer._init_weights()
+
+    def _compute_ves(self, input_ids: torch.Tensor):
+        """Pre-computa la lista di tensori VE per ogni layer (None se non abilitato)."""
+        if not self._has_any_ve:
+            return (None,) * self.n_layers
+        # Computa unique embeddings UNA volta, poi distribuisce per layer
+        unique_ves = [emb(input_ids) for emb in self.ve_embeddings]
+        return tuple(unique_ves[idx] if idx >= 0 else None for idx in self._ve_idx_per_layer)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_ids = x
+        x0 = self.embedder(x)
+        if self.smear_gate is not None:
+            x0 = self.smear_gate(x0)
+
+        ves = self._compute_ves(input_ids)
+
+        x = x0
+        for i, block in enumerate(self.blocks):
+            x = block(x, x0, ve=ves[i])
+
+        logits = self.unembedder(self.final_norm(x))
+        if self.softcap > 0:
+            logits = self.softcap * torch.tanh(logits / self.softcap)
+        return logits
+
+    @torch.no_grad()
+    def _clear_caches(self):
+        for block in self.blocks:
+            for mod in block.modules():
+                if hasattr(mod, "clear_cache"):
+                    mod.clear_cache()
+
+    @torch.no_grad()
+    def generate(self, prompt: torch.Tensor, max_len: int = 100,
+                 temperature: float = 1.0, top_k: int | None = None,
+                 top_p: float = 1.0, repetition_penalty: float = 1.0,
+                 token_end=None, simple: bool = False) -> torch.Tensor:
+        """KV-cached AR generation. Prefill in un colpo, poi token-by-token."""
+        if simple:
+            return simple_ar_generate(
+                self, prompt, max_len=max_len, temperature=temperature,
+                top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+                token_end=token_end,
+            )
+
+        self.eval()
+        self._clear_caches()
+
+        if prompt.dim() == 1:
+            prompt = prompt.unsqueeze(0)
+        device = next(self.parameters()).device
+        prompt = prompt.to(device)
+
+        # --- Prefill --------------------------------------------------------
+        x0 = self.embedder(prompt)
+        if self.smear_gate is not None:
+            x0 = self.smear_gate(x0)
+        ves = self._compute_ves(prompt)
+        x = x0
+        for i, block in enumerate(self.blocks):
+            x = block.generate(x, x0, ve=ves[i])
+        logits = self.unembedder(self.final_norm(x))[:, -1, :]
+        if self.softcap > 0:
+            logits = self.softcap * torch.tanh(logits / self.softcap)
+        if repetition_penalty != 1.0:
+            logits = apply_repetition_penalty(logits, prompt, repetition_penalty)
+        next_token = sample_next_token(logits, temperature, top_k, top_p)
+        generated = torch.cat([prompt, next_token], dim=1)
+
+        # --- Step-by-step ---------------------------------------------------
+        pbar = tqdm(range(max_len - 1), desc="PiCOFormer fast gen")
+        for _ in pbar:
+            x0_t = self.embedder(next_token)
+            if self.smear_gate is not None:
+                x0_t = self.smear_gate(x0_t)
+            ves_t = self._compute_ves(next_token)
+            x_t = x0_t
+            for i, block in enumerate(self.blocks):
+                x_t = block.generate(x_t, x0_t, ve=ves_t[i])
+            logits = self.unembedder(self.final_norm(x_t))[:, -1, :]
+            if self.softcap > 0:
+                logits = self.softcap * torch.tanh(logits / self.softcap)
+            if repetition_penalty != 1.0:
+                logits = apply_repetition_penalty(logits, generated, repetition_penalty)
+            next_token = sample_next_token(logits, temperature, top_k, top_p)
+            generated = torch.cat([generated, next_token], dim=1)
+            if token_end is not None and (next_token == token_end).all():
+                break
+
+        self._clear_caches()
+        return generated
+
+
 if __name__ == "__main__":
     d_models = [64 for i in range(4)]
     m_dims = [128, 64, 32, 16]

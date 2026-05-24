@@ -855,6 +855,33 @@ class VariableUDLP_CrossGate(Layer):
         return out
 
 
+class VariableGatedUDLP(Layer):
+    """UDLP + sparse output gate (parameter-golf / Modded-NanoGPT 1667 stile).
+
+    Gate sigmoid su prima slice di `gate_input_dim` del residual (sparse).
+    Output: `contract(activation(expand(x))) * sigmoid(gate_proj(x[..., :gate_input_dim]))`.
+    """
+    __name__ = "VariableGatedUDLP"
+
+    def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00, gate_input_dim=12):
+        super().__init__()
+        self.gate_input_dim = gate_input_dim
+        self.expand = nn.Linear(d_model, M, bias=False)
+        self.contract = nn.Linear(M, d_output, bias=False)
+        self.gate_proj = nn.Linear(gate_input_dim, d_output, bias=False)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        torch.nn.init.zeros_(self.contract.weight)
+        torch.nn.init.zeros_(self.gate_proj.weight)  # sigmoid(0)=0.5 → no-op iniziale
+
+    def forward(self, x):
+        out = self.contract(self.activation(self.expand(x)))
+        gate = torch.sigmoid(self.gate_proj(x[..., :self.gate_input_dim]))
+        return self.dropout(out * gate)
+
+
 class DoubleUDLP(Layer):
     def __init__(self, d_model, d_output, M, activation=ReLU2, dropout=0.00):
         super().__init__()

@@ -412,6 +412,104 @@ class MultiheadAttentionMixer(Layer):
         self.out.weight.requires_grad = False
 
 
+class MultiheadGatedAttentionMixer(Layer):
+    """MHA + sparse per-head output gate (Modded-NanoGPT PR #117 / parameter-golf 1667).
+
+    Gate input: prime `gate_input_dim` (default 12) dimensioni di x — sparse, ottimizzato
+    per Muon. Output: un sigmoid scalare per head, broadcast su head_dim. Init zero ⇒
+    gate parte a 0.5 (no-op).
+    """
+    __name__ = "MultiheadGatedAttentionMixer"
+    __complexity__ = "O(L^2 d + L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, causal: bool = True,
+                 pos_emb: nn.Module = None, dropout: float = 0.0, qk_norm: bool = False,
+                 gate_input_dim: int = 12):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.causal = causal
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout_p = dropout
+        self.gate_input_dim = gate_input_dim
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        self.gate_proj = nn.Linear(gate_input_dim, n_heads, bias=False)
+
+        self.pos_emb = pos_emb
+        self.kv_cache = None
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.out.weight)
+        nn.init.zeros_(self.gate_proj.weight)
+
+    def _apply_gate(self, attn: torch.Tensor, x_gate_in: torch.Tensor) -> torch.Tensor:
+        # attn: [B, H, L, D_h] | x_gate_in: [B, L, gate_input_dim]
+        gate = torch.sigmoid(self.gate_proj(x_gate_in))                 # [B, L, H]
+        return attn * gate.transpose(1, 2).unsqueeze(-1)                # broadcast su D_h
+
+    def forward(self, x: torch.Tensor, ve=None) -> torch.Tensor:
+        B, L, D = x.shape
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+        if ve is not None:
+            v = v + ve.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v, is_causal=self.causal,
+            dropout_p=self.dropout_p if self.training else 0.0,
+        )
+        attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+        return self.out(attn.transpose(1, 2).reshape(B, L, D))
+
+    def generate(self, x: torch.Tensor, ve=None) -> torch.Tensor:
+        B, L, D = x.shape
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=pos_offset)
+        if ve is not None:
+            v = v + ve.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+        self.kv_cache = (k, v)
+
+        attn = F.scaled_dot_product_attention(
+            q, k, v, is_causal=self.causal and (L > 1), dropout_p=0.0,
+        )
+        attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+        return self.out(attn.transpose(1, 2).reshape(B, L, D))
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+
 class MultiheadAttentionMixerALIBI(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d + L d^2)"
