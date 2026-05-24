@@ -633,14 +633,35 @@ class VathosModel(Layer):
         if not self.training:
             flag("You are not training")
 
-    def register_loss(self, loss: float):
+    def register_loss(self, loss: float) -> bool:
+        """Registra loss + NaN/Inf detection.
+
+        Ritorna True se loss finita, False se NaN/Inf (con warning).
+        Mantiene `self._nan_streak` (consecutive NaN counter).
+        """
+        is_bad = (loss != loss) or (loss == float('inf')) or (loss == float('-inf'))
+        if is_bad:
+            self._nan_streak = getattr(self, "_nan_streak", 0) + 1
+            import warnings
+            warnings.warn(
+                f"VathosModel.register_loss: loss non-finita ({loss}) a step "
+                f"{self.steps}. nan_streak={self._nan_streak}.",
+                RuntimeWarning, stacklevel=2,
+            )
+        else:
+            self._nan_streak = 0
         self._losses_dict[self.steps] = loss
         self._losses.append(loss)
         self._losses_this_epoch.append(loss)
         self.steps += 1
+        return not is_bad
 
     def get_last_loss(self):
         return self._losses[-1]
+
+    @property
+    def nan_streak(self) -> int:
+        return getattr(self, "_nan_streak", 0)
 
     def get_mean_loss(self, epoch=True):
         if epoch:
