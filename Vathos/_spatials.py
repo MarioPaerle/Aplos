@@ -1165,6 +1165,148 @@ class MultiheadAttentionMixerNOVLa4(Layer):
         self.out.weight.requires_grad = False
 
 
+class GQAGatedMixer(Layer):
+    """GQA + sparse per-head output gate + VE + KV cache.
+
+    Combina:
+    - GQA: n_kv_heads << n_heads. KV cache compatto (n_kv_heads heads).
+    - Sparse output gate: sigmoid(gate_proj(x[..., :gate_input_dim])) per-head,
+      broadcast su head_dim (Modded-NanoGPT PR #117 stile).
+    - Value embeddings (ve): aggiunti a v_expanded (full n_heads). Quando ve
+      è attivo la cache memorizza v in formato **expanded** (n_heads, costa
+      n_rep× memoria) per preservare per-step ve correttamente. Quando ve è
+      None, cache in formato compresso standard (n_kv_heads).
+
+    Identity-at-init: q_proj/kv_proj/gate_proj orthogonal, o_proj → 0.
+    """
+    __name__ = "GQAGatedMixer"
+    __complexity__ = "O(L^2 d + L d^2)"
+
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int,
+                 causal: bool = True, pos_emb: nn.Module = None,
+                 dropout: float = 0.0, qk_norm: bool = False,
+                 gate_input_dim: int = 12):
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError(f"d_model ({d_model}) must be divisible by n_heads ({n_heads})")
+        if n_heads % n_kv_heads != 0:
+            raise ValueError(f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv_heads})")
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.n_rep = n_heads // n_kv_heads
+        self.causal = causal
+        self.dropout_p = dropout
+        self.gate_input_dim = gate_input_dim
+
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.kv_proj = nn.Linear(d_model, n_kv_heads * self.head_dim * 2, bias=False)
+        self.o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.gate_proj = nn.Linear(gate_input_dim, n_heads, bias=False)
+
+        self.pos_emb = pos_emb
+        self.kv_cache = None
+
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        # Identity-at-init
+        nn.init.orthogonal_(self.q_proj.weight)
+        nn.init.orthogonal_(self.kv_proj.weight)
+        nn.init.zeros_(self.o_proj.weight)
+        nn.init.orthogonal_(self.gate_proj.weight)
+
+    _reset_parameters = _init_weights
+
+    def _expand_kv(self, x: torch.Tensor) -> torch.Tensor:
+        if self.n_rep == 1:
+            return x
+        B, H, L, D = x.shape
+        return (x.unsqueeze(2)
+                .expand(B, H, self.n_rep, L, D)
+                .reshape(B, H * self.n_rep, L, D))
+
+    def _apply_gate(self, attn: torch.Tensor, x_gate_in: torch.Tensor) -> torch.Tensor:
+        # attn: [B, n_heads, L, head_dim] | x_gate_in: [B, L, gate_input_dim]
+        gate = torch.sigmoid(self.gate_proj(x_gate_in))                 # [B, L, H]
+        return attn * gate.transpose(1, 2).unsqueeze(-1)
+
+    def forward(self, x: torch.Tensor, ve: torch.Tensor = None) -> torch.Tensor:
+        B, T, D = x.shape
+
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        kv = self.kv_proj(x).view(B, T, self.n_kv_heads, 2, self.head_dim)
+        k, v = kv.unbind(dim=3)
+        k, v = k.transpose(1, 2), v.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.pos_emb is not None:
+            q, k = self.pos_emb(q, k, start_pos=0)
+
+        k_exp = self._expand_kv(k)
+        v_exp = self._expand_kv(v)
+        if ve is not None:
+            v_exp = v_exp + ve.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        attn = F.scaled_dot_product_attention(
+            q, k_exp, v_exp, is_causal=self.causal,
+            dropout_p=self.dropout_p if self.training else 0.0,
+        )
+        attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+        return self.o_proj(attn.transpose(1, 2).reshape(B, T, D))
+
+    def generate(self, x: torch.Tensor, ve: torch.Tensor = None) -> torch.Tensor:
+        B, T, D = x.shape
+
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        kv = self.kv_proj(x).view(B, T, self.n_kv_heads, 2, self.head_dim)
+        k_new, v_new = kv.unbind(dim=3)
+        k_new, v_new = k_new.transpose(1, 2), v_new.transpose(1, 2)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k_new = self.k_norm(k_new)
+
+        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+        if self.pos_emb is not None:
+            q, k_new = self.pos_emb(q, k_new, start_pos=pos_offset)
+
+        # Cache k sempre in formato raw (n_kv_heads). Cache v:
+        # - se ve attivo: formato EXPANDED (n_heads), perché ve si applica per-step
+        # - altrimenti: raw (n_kv_heads), standard GQA
+        if ve is not None:
+            v_new = self._expand_kv(v_new) + ve.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            k_new = torch.cat([k_cache, k_new], dim=2)
+            v_new = torch.cat([v_cache, v_new], dim=2)
+        self.kv_cache = (k_new, v_new)
+
+        # Attention: k_new sempre da espandere; v_new già expanded se ve, raw altrimenti
+        k_for_attn = self._expand_kv(k_new)
+        v_for_attn = v_new if ve is not None else self._expand_kv(v_new)
+
+        attn = F.scaled_dot_product_attention(
+            q, k_for_attn, v_for_attn,
+            is_causal=self.causal and (T > 1), dropout_p=0.0,
+        )
+        attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+        return self.o_proj(attn.transpose(1, 2).reshape(B, T, D))
+
+    def clear_cache(self):
+        self.kv_cache = None
+
+
 class GroupedQueryAttention(Layer):
     __name__ = "GroupedQueryAttention"
     __complexity__ = "O(L^2 d + L d^2)"
