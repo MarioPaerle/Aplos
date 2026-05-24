@@ -327,6 +327,36 @@ class ShortConvGatedMixer(Layer):
         return self.mixer(g1) * g2 + (1 - g2) * x
 
 
+class SmearGate(Layer):
+    """Smear gate (Modded-NanoGPT 2025-09 record): gate input-dependent + skip token-1.
+
+    Per ogni posizione t > 0:
+        x[t] += smear_lambda * sigmoid(W_gate @ x[t, :gate_input_dim]) * x[t-1]
+
+    Gate sparse (default 12 dim su d_model), input-dependent. Token 0 invariato.
+    smear_lambda init=0 ⇒ no-op iniziale. Receptive field = 1 (lookback=1 in fast gen).
+    """
+    __name__ = "SmearGate"
+
+    def __init__(self, d_model: int, gate_input_dim: int = 12):
+        super().__init__()
+        self.gate_input_dim = gate_input_dim
+        self.gate = nn.Linear(gate_input_dim, d_model, bias=False)
+        self.smear_lambda = nn.Parameter(torch.zeros(1))
+
+    def _init_weights(self):
+        nn.init.zeros_(self.gate.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, L, D]. Caso L==1: nessuno "x[t-1]" disponibile → no-op.
+        if x.size(1) < 2:
+            return x
+        gate = torch.sigmoid(self.gate(x[:, 1:, :self.gate_input_dim]))  # [B, L-1, D]
+        prev = x[:, :-1, :]                                              # [B, L-1, D]
+        shifted = self.smear_lambda * gate * prev                        # [B, L-1, D]
+        return torch.cat([x[:, :1, :], x[:, 1:, :] + shifted], dim=1)
+
+
 class Embedder(Layer):
     __name__ = "SymbolicEmbedder"
     __complexity__ = "O(L d)"
