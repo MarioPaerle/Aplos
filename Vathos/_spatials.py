@@ -312,11 +312,15 @@ class MultiheadAttentionMixer(Layer):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
-        self._reset_parameters()
+        self._init_weights()
 
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qkv.weight)
-        nn.init.xavier_uniform_(self.out.weight)
+    def _init_weights(self):
+        # Identity-at-init: qkv orthogonal (preserva geometria), out → 0.
+        nn.init.orthogonal_(self.qkv.weight)
+        nn.init.zeros_(self.out.weight)
+
+    # Alias backward-compat per chi chiama explicit _reset_parameters.
+    _reset_parameters = _init_weights
 
     def forward(self, x: torch.Tensor, ve=None) -> torch.Tensor:
         """
@@ -445,12 +449,16 @@ class MultiheadGatedAttentionMixer(Layer):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
-        self._reset_parameters()
+        self._init_weights()
 
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qkv.weight)
-        nn.init.xavier_uniform_(self.out.weight)
-        nn.init.zeros_(self.gate_proj.weight)
+    def _init_weights(self):
+        # Identity-at-init: qkv orthogonal, out → 0, gate_proj orthogonal
+        # (out=0 ⇒ contributo attention nullo all'init, indipendentemente dal gate).
+        nn.init.orthogonal_(self.qkv.weight)
+        nn.init.zeros_(self.out.weight)
+        nn.init.orthogonal_(self.gate_proj.weight)
+
+    _reset_parameters = _init_weights
 
     def _apply_gate(self, attn: torch.Tensor, x_gate_in: torch.Tensor) -> torch.Tensor:
         # attn: [B, H, L, D_h] | x_gate_in: [B, L, gate_input_dim]

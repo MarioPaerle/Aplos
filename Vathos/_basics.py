@@ -770,6 +770,8 @@ class VariableUDLP(Layer):
         self.dropout = nn.Dropout(dropout)
 
     def _init_weights(self):
+        # Identity-at-init: expand orthogonal, contract → 0 ⇒ FFN contributo nullo.
+        torch.nn.init.orthogonal_(self.expand.weight)
         torch.nn.init.zeros_(self.contract.weight)
 
     def forward(self, x):
@@ -891,8 +893,11 @@ class VariableGatedUDLP(Layer):
         self.dropout = nn.Dropout(dropout)
 
     def _init_weights(self):
+        # Identity-at-init: expand + gate_proj orthogonal, contract → 0
+        # (con contract=0 il branch è zero indipendentemente dal gate).
+        torch.nn.init.orthogonal_(self.expand.weight)
         torch.nn.init.zeros_(self.contract.weight)
-        torch.nn.init.zeros_(self.gate_proj.weight)  # sigmoid(0)=0.5 → no-op iniziale
+        torch.nn.init.orthogonal_(self.gate_proj.weight)
 
     def forward(self, x):
         out = self.contract(self.activation(self.expand(x)))

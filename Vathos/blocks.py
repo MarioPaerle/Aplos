@@ -345,7 +345,9 @@ class SmearGate(Layer):
         self.smear_lambda = nn.Parameter(torch.zeros(1))
 
     def _init_weights(self):
-        nn.init.zeros_(self.gate.weight)
+        # Identity-at-init: gate orthogonal; smear_lambda già 0 da __init__
+        # ⇒ shifted = 0 ⇒ no-op iniziale indipendentemente dal gate.
+        nn.init.orthogonal_(self.gate.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, L, D]. Caso L==1: nessuno "x[t-1]" disponibile → no-op.
@@ -1922,17 +1924,23 @@ class PiCOFormer(VathosModel):
         self._init_weights()
 
     def _init_weights(self):
+        # Embeddings: normal std=0.02 (standard). LM head tied di default ⇒ stesso peso.
         std_embed = 0.02
         nn.init.normal_(self.embedder.embedding.weight, mean=0.0, std=std_embed)
         if self.unembedder.linear.weight is not self.embedder.embedding.weight:
             nn.init.normal_(self.unembedder.linear.weight, mean=0.0, std=std_embed)
         for emb in self.ve_embeddings:
             nn.init.normal_(emb.weight, mean=0.0, std=std_embed)
+
+        # Sub-modules: ciascuno definisce la propria policy di identity-init.
+        if self.smear_gate is not None and hasattr(self.smear_gate, "_init_weights"):
+            self.smear_gate._init_weights()
         for block in self.blocks:
             if hasattr(block.channel_mixer, "_init_weights"):
                 block.channel_mixer._init_weights()
             if hasattr(block.spatial_mixer, "_init_weights"):
                 block.spatial_mixer._init_weights()
+        # x0_lambda (BlockX0) e ve_scale (PiCOBlock) sono già zero-init da nn.Parameter(torch.zeros(1)).
 
     def _compute_ves(self, input_ids: torch.Tensor):
         """Pre-computa la lista di tensori VE per ogni layer (None se non abilitato)."""
