@@ -3,8 +3,8 @@ import torch.nn.functional as F
 import time
 import numpy as np
 
-# matplotlib è usato solo dalle utility di plot/benchmark, non dal codice del modello.
-# Lazy + optional import per non rompere l'import di Vathos in ambienti headless.
+# matplotlib is only used by plot/benchmark utilities, never by the model code.
+# Lazy + optional import to avoid breaking Vathos import in headless environments.
 try:
     import matplotlib.pyplot as plt
     plt.style.use('ggplot')

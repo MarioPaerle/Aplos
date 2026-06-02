@@ -6,7 +6,7 @@ import os
 # Aggiungiamo la root al path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-# Importiamo tutto il possibile da Vathos
+# Import everything available from Vathos
 import Vathos._basics as basics
 import Vathos.blocks as blocks
 
@@ -19,7 +19,7 @@ dpg.create_context()
 
 # --- REGISTRO DEL GRAFO (Per l'esportazione in Python) ---
 NODE_REGISTRY = {}
-LINK_REGISTRY = {}  # <-- Aggiunto per tracciare i collegamenti in modo sicuro!
+LINK_REGISTRY = {}  # tracks connections safely
 MODEL_IN_PIN = dpg.generate_uuid()
 MODEL_OUT_PIN = dpg.generate_uuid()
 
@@ -116,7 +116,7 @@ def generate_vathos_code():
     slot_deps = {nid: {} for nid in NODE_REGISTRY}
     tensor_flow = {}
 
-    # Analizza i collegamenti tramite il nostro registro sicuro
+    # Parse connections through our safe registry
     for link in links:
         if link not in LINK_REGISTRY:
             continue
@@ -131,7 +131,7 @@ def generate_vathos_code():
             elif dst_type == 'tensor_in':
                 tensor_flow[dst_node] = src_node
 
-    # Sort Topologico per l'__init__ (Risolve prima le dipendenze interne)
+    # Topological sort for __init__ (resolve inner dependencies first)
     init_order = []
     visited = set()
 
@@ -201,7 +201,7 @@ def generate_vathos_code():
             code += f"        x = self.{var_names[nid]}(x)\n"
         code += "        return x\n"
 
-    code += "\n# Istanzia e testa il modello\nif __name__ == '__main__':\n"
+    code += "\n# Instantiate and test the model\nif __name__ == '__main__':\n"
     code += "    model = GeneratedVathosModel()\n"
     code += "    print(model)\n"
     return code
@@ -306,7 +306,7 @@ def link_callback(sender, app_data):
     source_pin, dest_pin = app_data[0], app_data[1]
 
     link_id = dpg.add_node_link(source_pin, dest_pin, parent=sender)
-    # Salviamo le connessioni nel nostro registro per essere sicuri
+    # Save the connection in our registry
     LINK_REGISTRY[link_id] = (source_pin, dest_pin)
 
     pin_type = dpg.get_item_user_data(dest_pin)
@@ -318,7 +318,7 @@ def link_callback(sender, app_data):
 
 def delink_callback(sender, app_data):
     dpg.delete_item(app_data)
-    # Rimuoviamo il link dal nostro registro sicuro
+    # Remove the link from our registry
     if app_data in LINK_REGISTRY:
         del LINK_REGISTRY[app_data]
 

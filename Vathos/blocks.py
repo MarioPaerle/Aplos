@@ -345,8 +345,8 @@ class SmearGate(Layer):
         self.smear_lambda = nn.Parameter(torch.zeros(1))
 
     def _init_weights(self):
-        # Identity-at-init: gate orthogonal; smear_lambda già 0 da __init__
-        # ⇒ shifted = 0 ⇒ no-op iniziale indipendentemente dal gate.
+        # Identity-at-init: gate orthogonal; smear_lambda already 0 from __init__
+        # => shifted = 0 => initial no-op regardless of the gate.
         nn.init.orthogonal_(self.gate.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1291,9 +1291,9 @@ class ModdedFormer(VathosModel):
         self.ve_gate_dim = ve_gate_dim if ve_gate_dim is not None else embed_dim
         self.value_embeddings_cfg = value_embeddings
 
-        # Value embeddings: ModuleDict/ParameterDict come prima (per leggibilità + checkpoint legacy),
-        # MA in più costruiamo strutture INDEXED-BY-LAYER per il forward (no str() runtime, no dict
-        # lookup → compile-friendly).
+        # Value embeddings: ModuleDict/ParameterDict as before (readability + legacy checkpoints),
+        # BUT we also build INDEXED-BY-LAYER structures for the forward (no str() at runtime,
+        # no dict lookup → compile-friendly).
         if value_embeddings is not None:
             assert len(value_embeddings) == n_layers, "value_embeddings length must equal n_layers"
             unique_groups = sorted(set(v for v in value_embeddings if v is not None))
@@ -1361,7 +1361,7 @@ class ModdedFormer(VathosModel):
                 gate_param_count += 1
         self._skip_consume_at = tuple(tuple(lst) for lst in consume_lists)
         self._has_any_skip = gate_param_count > 0
-        # ParameterList parallela: stessi tensori della ParameterDict legacy, indicizzati posizionalmente.
+        # Parallel ParameterList: same tensors as the legacy ParameterDict, positionally indexed.
         if self._has_any_skip:
             self._skip_gates_list = nn.ParameterList([
                 self.skip_lambdas[f"route_{s}_to_{t}"]
@@ -1410,7 +1410,7 @@ class ModdedFormer(VathosModel):
 
     def forward(self, x):
         # FAST PATH: standard transformer pretrain, no skip / no VE / no zeroskip / no PE / no smear.
-        # È il caso di gran lunga più comune (es. PiCO 2 / Guido-1 baseline).
+        # By far the most common case (e.g. PiCO 2 / Guido-1 baseline).
         if self._fast_path:
             x = self.embedder(x)
             for block in self.blocks:
@@ -1430,7 +1430,7 @@ class ModdedFormer(VathosModel):
             x0 = self.smear_gate(x0)
 
         x = x0
-        # Buffer di skip: lista Python di lunghezza fissa = n_layers. Allocata solo se serve.
+        # Skip buffer: fixed-length Python list = n_layers. Allocated only if needed.
         skip_buffer = [None] * self.n_layer if self._has_any_skip else None
 
         for i, block in enumerate(self.blocks):
@@ -1773,13 +1773,13 @@ NOVLa2 = MultiheadAttentionMixerNOVLa2
 # HIGH-LEVEL MODELS
 # =============================================================================
 #
-# Modelli pronti all'uso, ottimizzati per training/inference efficienti. A
-# differenza di SequenceModel / ModdedFormer (pensati per studio + ablation),
-# qui ogni Python branch è pre-risolto al __init__, niente ParameterDict /
-# ModuleDict string-keyed, niente dict mutati nel forward. Tutto torch.compile-
+# Ready-to-use models optimized for efficient training/inference. Unlike
+# SequenceModel / ModdedFormer (meant for study + ablation), here every Python
+# branch is pre-resolved at __init__, no string-keyed ParameterDict /
+# ModuleDict, no dicts mutated in the forward. Everything is torch.compile-
 # friendly.
 #
-# d_model è fissa su tutti i layer (sceltà per semplicità + compile efficiency).
+# d_model is fixed across all layers (chosen for simplicity + compile efficiency).
 # =============================================================================
 
 
@@ -1936,7 +1936,7 @@ class PiCOFormer(VathosModel):
         # smear_gate_lookback: 0 = stateless (per-token pointwise) — il fast path
         # generate() lo applica al singolo token. Se >0, il fast path mantiene una
         # rolling window di `lookback` token raw embeddings e ricomputa smear su
-        # `window + new_token` (necessario per conv causali kernel>1, RNN, ecc.).
+        # `window + new_token` (needed for causal conv kernel>1, RNN, etc.).
         self.smear_gate = smear_gate
         self._smear_lookback = int(smear_gate_lookback)
         self._x_window = None
@@ -1961,7 +1961,7 @@ class PiCOFormer(VathosModel):
                 block.channel_mixer._init_weights()
             if hasattr(block.spatial_mixer, "_init_weights"):
                 block.spatial_mixer._init_weights()
-        # x0_lambda (BlockX0) e ve_scale (PiCOBlock) sono già zero-init da nn.Parameter(torch.zeros(1)).
+        # x0_lambda (BlockX0) and ve_scale (PiCOBlock) are already zero-init from nn.Parameter(torch.zeros(1)).
 
     def _compute_ves(self, input_ids: torch.Tensor):
         """Pre-computa la lista di tensori VE per ogni layer (None se non abilitato)."""
@@ -2012,7 +2012,7 @@ class PiCOFormer(VathosModel):
         self.eval()
         self._clear_caches()
 
-        # Warning una tantum se smear_gate è non-trivial ma lookback=0
+        # One-shot warning if smear_gate is non-trivial but lookback=0
         if (self.smear_gate is not None
                 and not isinstance(self.smear_gate, nn.Identity)
                 and self._smear_lookback == 0
@@ -2073,6 +2073,274 @@ class PiCOFormer(VathosModel):
             x_t = x0_t
             for i, block in enumerate(self.blocks):
                 x_t = block.generate(x_t, x0_t, ve=ves_t[i])
+            logits = self.unembedder(self.final_norm(x_t))[:, -1, :]
+            if self.softcap > 0:
+                logits = self.softcap * torch.tanh(logits / self.softcap)
+            if repetition_penalty != 1.0:
+                logits = apply_repetition_penalty(logits, generated, repetition_penalty)
+            next_token = sample_next_token(logits, temperature, top_k, top_p)
+            generated = torch.cat([generated, next_token], dim=1)
+            if token_end is not None and (next_token == token_end).all():
+                break
+
+        self._clear_caches()
+        return generated
+
+
+# =============================================================================
+# Conditioned variant of PiCOFormer — AdaLN modulation on a categorical context
+# =============================================================================
+class AdaLNPiCOBlock(PiCOBlock):
+    """PiCOBlock with AdaLN modulation of the pre-norm activations.
+
+    For each pre-norm path the normalized hidden state is modulated by
+        modulate(norm(x), gamma, beta) = norm(x) * (1 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+    where (gamma1, beta1, gamma2, beta2) are produced by a single zero-initialized
+    `Linear(cond_dim -> 4 * d_model)` from the conditioning vector. With zero init the
+    block reduces exactly to `PiCOBlock` at step 0 (identity-at-init), and the model
+    learns the conditioning signal during training. All other PiCOBlock features
+    (x0-skip, optional value-embedding) are preserved.
+    """
+    __name__ = "AdaLNPiCOBlock"
+
+    def __init__(self, d_model: int, channel_mixer: Layer, spatial_mixer: Layer,
+                 cond_dim: int, norm=RMSNorm, ve_enabled: bool = False):
+        super().__init__(d_model, channel_mixer, spatial_mixer, norm=norm, ve_enabled=ve_enabled)
+        self.cond_dim = cond_dim
+        # cond -> (gamma1, beta1, gamma2, beta2)
+        self.adaLN_modulation = nn.Linear(cond_dim, 4 * d_model, bias=True)
+        nn.init.zeros_(self.adaLN_modulation.weight)
+        nn.init.zeros_(self.adaLN_modulation.bias)
+
+    @staticmethod
+    def _modulate(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
+        # x: [B, L, D]; gamma/beta: [B, D]
+        return x * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+
+    def _split_modulation(self, cond: torch.Tensor):
+        return self.adaLN_modulation(cond).chunk(4, dim=-1)
+
+    def forward(self, x: torch.Tensor, x0: torch.Tensor, cond: torch.Tensor,
+                ve: torch.Tensor = None) -> torch.Tensor:
+        gamma1, beta1, gamma2, beta2 = self._split_modulation(cond)
+        h1 = self._modulate(self.norm1(x), gamma1, beta1)
+        if self.ve_enabled and ve is not None:
+            x = x + self.spatial_mixer(h1, ve=ve * self.ve_scale)
+        else:
+            x = x + self.spatial_mixer(h1)
+        h2 = self._modulate(self.norm2(x), gamma2, beta2)
+        x = x + self.channel_mixer(h2)
+        return x + self.x0_lambda * x0
+
+    def generate(self, x: torch.Tensor, x0: torch.Tensor, cond: torch.Tensor,
+                 ve: torch.Tensor = None) -> torch.Tensor:
+        gamma1, beta1, gamma2, beta2 = self._split_modulation(cond)
+        h1 = self._modulate(self.norm1(x), gamma1, beta1)
+        sm = self.spatial_mixer
+        if self.ve_enabled and ve is not None:
+            scaled = ve * self.ve_scale
+            x = x + (sm.generate(h1, ve=scaled) if sm.has_custom_generate() else sm(h1, ve=scaled))
+        else:
+            x = x + (sm.generate(h1) if sm.has_custom_generate() else sm(h1))
+        h2 = self._modulate(self.norm2(x), gamma2, beta2)
+        cm = self.channel_mixer
+        x = x + (cm.generate(h2) if cm.has_custom_generate() else cm(h2))
+        return x + self.x0_lambda * x0
+
+
+class ConditionedPiCOFormer(PiCOFormer):
+    """PiCOFormer + AdaLN-modulated conditioning on a categorical context.
+
+    Inherits every PiCOFormer feature (heterogeneous spatial mixers, x0-skip,
+    value embeddings, smear gate, logit softcap, tied embeddings, fast KV-cached
+    generation) and adds:
+
+    - An `nn.Embedding(n_conditions, cond_dim)` whose output is broadcast to every
+      block to produce per-block AdaLN (gamma, beta) modulations on both pre-norms.
+    - `AdaLNPiCOBlock` everywhere in place of `PiCOBlock`.
+    - `forward(input_ids, condition)` and `generate(prompt, condition, ...)`:
+      the `condition` is a `LongTensor` of class IDs (int per sequence, e.g. composer).
+
+    Identity-at-init: AdaLN modulations are zero-initialized → at step 0 the model
+    is functionally identical to a plain PiCOFormer with the same flags.
+    """
+    __name__ = "ConditionedPiCOFormer"
+
+    def __init__(self, vocab_size: int, d_model: int, n_layers: int,
+                 spatials, n_conditions: int, cond_dim: int | None = None,
+                 channel=None, norm=RMSNorm,
+                 ve_groups=None, smear_gate: nn.Module = None,
+                 smear_gate_lookback: int = 0,
+                 logit_softcap: float = 30.0, tied_embeddings: bool = True):
+        # Bypass PiCOFormer.__init__ (which builds PiCOBlocks); call VathosModel/Layer init.
+        VathosModel.__init__(self)
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.softcap = logit_softcap
+        self.n_conditions = n_conditions
+        self.cond_dim = cond_dim if cond_dim is not None else d_model
+
+        spatials_list = spatials if isinstance(spatials, list) else [spatials] * n_layers
+        assert len(spatials_list) == n_layers, "len(spatials) must equal n_layers"
+
+        if channel is None:
+            channel = Builder(VariableUDLP, d_output=d_model, M=4 * d_model, activation=ReLU2)
+
+        # Value embeddings — same handling as PiCOFormer
+        self._has_any_ve = ve_groups is not None and any(g is not None for g in ve_groups)
+        if self._has_any_ve:
+            assert len(ve_groups) == n_layers, "len(ve_groups) must equal n_layers"
+            unique_groups = sorted({g for g in ve_groups if g is not None})
+            self.ve_embeddings = nn.ModuleList([nn.Embedding(vocab_size, d_model) for _ in unique_groups])
+            group_to_idx = {g: i for i, g in enumerate(unique_groups)}
+            self._ve_idx_per_layer = tuple(
+                group_to_idx[g] if g is not None else -1 for g in ve_groups
+            )
+        else:
+            self.ve_embeddings = nn.ModuleList()
+            self._ve_idx_per_layer = (-1,) * n_layers
+        self._ve_enabled_per_layer = tuple(idx >= 0 for idx in self._ve_idx_per_layer)
+
+        # Embeddings + final norm + unembedder
+        self.embedder = Embedder(vocab_size, d_model)
+        self.unembedder = UnbiasedLinear(d_model, vocab_size)
+        if tied_embeddings:
+            self.unembedder.linear.weight = self.embedder.embedding.weight
+        self.final_norm = norm(d_model)
+
+        # Categorical context embedding (composer, genre, ...)
+        self.cond_embedder = nn.Embedding(n_conditions, self.cond_dim)
+
+        # AdaLN PiCO blocks
+        self.blocks = nn.ModuleList([
+            AdaLNPiCOBlock(
+                d_model,
+                channel_mixer=channel(d_model),
+                spatial_mixer=spatials_list[i](d_model),
+                cond_dim=self.cond_dim,
+                norm=norm,
+                ve_enabled=self._ve_enabled_per_layer[i],
+            )
+            for i in range(n_layers)
+        ])
+
+        # Smear gate (optional, mirrors PiCOFormer)
+        self.smear_gate = smear_gate
+        self._smear_lookback = int(smear_gate_lookback)
+        self._x_window = None
+        self._smear_gate_warned = False
+
+        self._init_weights()
+
+    def _init_weights(self):
+        # Reuse PiCOFormer's init for the shared parts (embedder, ve, sub-modules, x0_lambda zero).
+        super()._init_weights()
+        # Conditioning embedding: standard small std.
+        nn.init.normal_(self.cond_embedder.weight, mean=0.0, std=0.02)
+        # AdaLN modulation linears are zero-initialized inside AdaLNPiCOBlock.__init__.
+
+    def _condition(self, condition: torch.Tensor) -> torch.Tensor:
+        """condition: LongTensor [B] (or scalar) -> [B, cond_dim]."""
+        if condition.dim() == 0:
+            condition = condition.unsqueeze(0)
+        return self.cond_embedder(condition)
+
+    def forward(self, input_ids: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        cond = self._condition(condition)
+        x0 = self.embedder(input_ids)
+        if self.smear_gate is not None:
+            x0 = self.smear_gate(x0)
+        ves = self._compute_ves(input_ids)
+        x = x0
+        for i, block in enumerate(self.blocks):
+            x = block(x, x0, cond, ve=ves[i])
+        logits = self.unembedder(self.final_norm(x))
+        if self.softcap > 0:
+            logits = self.softcap * torch.tanh(logits / self.softcap)
+        return logits
+
+    @torch.no_grad()
+    def generate(self, prompt: torch.Tensor, condition,
+                 max_len: int = 100, temperature: float = 1.0,
+                 top_k: int | None = None, top_p: float = 1.0,
+                 repetition_penalty: float = 1.0, token_end=None) -> torch.Tensor:
+        """KV-cached AR generation under a fixed conditioning ID.
+
+        prompt:    LongTensor [L] or [B, L].
+        condition: int, LongTensor [] or [B]. Scalar conditions are broadcast over the batch.
+        """
+        self.eval()
+        self._clear_caches()
+
+        # Smear-gate stateful warning (mirrors PiCOFormer)
+        if (self.smear_gate is not None
+                and not isinstance(self.smear_gate, nn.Identity)
+                and self._smear_lookback == 0
+                and not self._smear_gate_warned):
+            import warnings
+            warnings.warn(
+                "ConditionedPiCOFormer.generate: smear_gate non-Identity with "
+                "smear_gate_lookback=0. If the module has temporal state (conv kernel>1, "
+                "RNN, etc.), the fast path will diverge from the eager forward. "
+                "Set smear_gate_lookback=<receptive_field-1>.",
+                RuntimeWarning, stacklevel=2,
+            )
+            self._smear_gate_warned = True
+
+        if prompt.dim() == 1:
+            prompt = prompt.unsqueeze(0)
+        device = next(self.parameters()).device
+        prompt = prompt.to(device)
+
+        if isinstance(condition, int):
+            condition = torch.tensor([condition], device=device)
+        else:
+            condition = condition.to(device)
+            if condition.dim() == 0:
+                condition = condition.unsqueeze(0)
+        if condition.size(0) == 1 and prompt.size(0) > 1:
+            condition = condition.expand(prompt.size(0))
+        cond = self._condition(condition)
+
+        # --- Prefill ---------------------------------------------------------
+        x0_raw = self.embedder(prompt)
+        if self.smear_gate is not None:
+            x0 = self.smear_gate(x0_raw)
+            if self._smear_lookback > 0:
+                self._x_window = x0_raw[:, -self._smear_lookback:, :].clone()
+        else:
+            x0 = x0_raw
+        ves = self._compute_ves(prompt)
+        x = x0
+        for i, block in enumerate(self.blocks):
+            x = block.generate(x, x0, cond, ve=ves[i])
+        logits = self.unembedder(self.final_norm(x))[:, -1, :]
+        if self.softcap > 0:
+            logits = self.softcap * torch.tanh(logits / self.softcap)
+        if repetition_penalty != 1.0:
+            logits = apply_repetition_penalty(logits, prompt, repetition_penalty)
+        next_token = sample_next_token(logits, temperature, top_k, top_p)
+        generated = torch.cat([prompt, next_token], dim=1)
+
+        # --- Step-by-step ----------------------------------------------------
+        pbar = tqdm(range(max_len - 1), desc="ConditionedPiCOFormer fast gen")
+        for _ in pbar:
+            x0_t_raw = self.embedder(next_token)
+            if self.smear_gate is not None:
+                if self._smear_lookback > 0:
+                    combined = torch.cat([self._x_window, x0_t_raw], dim=1)
+                    smeared = self.smear_gate(combined)
+                    x0_t = smeared[:, -1:, :]
+                    self._x_window = combined[:, -self._smear_lookback:, :]
+                else:
+                    x0_t = self.smear_gate(x0_t_raw)
+            else:
+                x0_t = x0_t_raw
+            ves_t = self._compute_ves(next_token)
+            x_t = x0_t
+            for i, block in enumerate(self.blocks):
+                x_t = block.generate(x_t, x0_t, cond, ve=ves_t[i])
             logits = self.unembedder(self.final_norm(x_t))[:, -1, :]
             if self.softcap > 0:
                 logits = self.softcap * torch.tanh(logits / self.softcap)

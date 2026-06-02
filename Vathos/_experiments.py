@@ -74,7 +74,7 @@ class Experiment:
         with open(run_path / "config.json", "r") as f:
             config = json.load(f)
 
-        # Ricostruisce l'oggetto bypassando la creazione della cartella root
+        # Rebuild the object bypassing root-dir creation
         exp = cls(project_name=project_name, exp_name=exp_name, config=config, root_dir=run_path.parent.parent)
 
         with open(run_path / "metrics.json", "r") as f:

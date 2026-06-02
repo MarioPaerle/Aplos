@@ -1280,9 +1280,9 @@ class GQAGatedMixer(Layer):
         if self.pos_emb is not None:
             q, k_new = self.pos_emb(q, k_new, start_pos=pos_offset)
 
-        # Cache k sempre in formato raw (n_kv_heads). Cache v:
-        # - se ve attivo: formato EXPANDED (n_heads), perché ve si applica per-step
-        # - altrimenti: raw (n_kv_heads), standard GQA
+        # k is always cached raw (n_kv_heads). v cache format:
+        # - if ve active: EXPANDED (n_heads), since ve is applied per-step
+        # - else: raw (n_kv_heads), standard GQA
         if ve is not None:
             v_new = self._expand_kv(v_new) + ve.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
@@ -1292,7 +1292,7 @@ class GQAGatedMixer(Layer):
             v_new = torch.cat([v_cache, v_new], dim=2)
         self.kv_cache = (k_new, v_new)
 
-        # Attention: k_new sempre da espandere; v_new già expanded se ve, raw altrimenti
+        # Attention: k_new always needs expand; v_new already expanded if ve, raw otherwise
         k_for_attn = self._expand_kv(k_new)
         v_for_attn = v_new if ve is not None else self._expand_kv(v_new)
 

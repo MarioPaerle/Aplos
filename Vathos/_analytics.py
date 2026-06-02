@@ -65,7 +65,7 @@ def compute_shannon_entropy(attn_weights: np.ndarray) -> List[float]:
     w_calc = attn_weights if attn_weights.ndim == 3 else attn_weights[np.newaxis]
     entropies = []
     for h in range(w_calc.shape[0]):
-        wh = w_calc[h] + 1e-12  # Epsilon per stabilità numerica nel log
+        wh = w_calc[h] + 1e-12  # epsilon for numerical stability in the log
         ent = -(wh * np.log(wh)).sum(axis=-1).mean()
         entropies.append(float(ent))
     return entropies

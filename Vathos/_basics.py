@@ -823,11 +823,11 @@ class VariableUDLP_Attention(Layer):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        # 4. Score dell'attention: Q K^T
-        # q è [..., d_k], k è [M, d_k]. F.linear(q, k) fa esattamente q @ k.T
+        # 4. Attention scores: Q K^T
+        # q is [..., d_k], k is [M, d_k]. F.linear(q, k) is exactly q @ k.T
         scores = F.linear(q, k)
 
-        # 5. Attivazione generica (es. ReLU^2) e Dropout
+        # 5. Generic activation (e.g. ReLU^2) and Dropout
         h = self.dropout(self.activation(scores))
 
         # 6. Proiezione V (contract) e padding automatico se d_output < d_model
@@ -846,13 +846,10 @@ class VariableUDLP_CrossGate(Layer):
         self.d_output = d_output
         self.half_dim = d_model // 2
 
-        # Ramo di attivazione (legge la prima metà)
         self.expand_k = nn.Linear(self.half_dim, M, bias=False)
 
-        # Ramo di gating (legge la seconda metà)
         self.expand_g = nn.Linear(d_model - self.half_dim, M, bias=False)
 
-        # Proiezione finale
         self.contract = nn.Linear(M, d_output, bias=False)
 
         self.activation = activation()
@@ -876,9 +873,9 @@ class VariableUDLP_CrossGate(Layer):
 
 
 class VariableGatedUDLP(Layer):
-    """UDLP + sparse output gate (parameter-golf / Modded-NanoGPT 1667 stile).
+    """UDLP + sparse output gate (parameter-golf / Modded-NanoGPT 1667 style).
 
-    Gate sigmoid su prima slice di `gate_input_dim` del residual (sparse).
+    Sigmoid gate over the first `gate_input_dim` slice of the residual (sparse).
     Output: `contract(activation(expand(x))) * sigmoid(gate_proj(x[..., :gate_input_dim]))`.
     """
     __name__ = "VariableGatedUDLP"
@@ -894,7 +891,7 @@ class VariableGatedUDLP(Layer):
 
     def _init_weights(self):
         # Identity-at-init: expand + gate_proj orthogonal, contract → 0
-        # (con contract=0 il branch è zero indipendentemente dal gate).
+        # (with contract=0 the branch is zero regardless of the gate).
         torch.nn.init.orthogonal_(self.expand.weight)
         torch.nn.init.zeros_(self.contract.weight)
         torch.nn.init.orthogonal_(self.gate_proj.weight)
@@ -903,6 +900,37 @@ class VariableGatedUDLP(Layer):
         out = self.contract(self.activation(self.expand(x)))
         gate = torch.sigmoid(self.gate_proj(x[..., :self.gate_input_dim]))
         return self.dropout(out * gate)
+
+
+class VariableGLU(Layer):
+    """GLU-style channel mixer (à la SwiGLU/ReGLU): `contract(activation(expand(x)) * up(x))`.
+
+    Default activation is `LeakyReLU2`, giving the "LeakyReGLU²" variant. Adds one extra
+    projection (`up`, d_model→M) over `VariableUDLP` → ~+50% FFN params. Identity-at-init
+    via `contract=0` (the branch is zero at init while gradients still flow through
+    `expand` and `up`).
+
+    Same `(d_model, d_output, M, activation, dropout)` signature as `VariableUDLP`, so it
+    is a drop-in replacement in `Builder(...)`.
+    """
+    __name__ = "VariableGLU"
+
+    def __init__(self, d_model, d_output, M, activation=LeakyReLU2, dropout=0.00):
+        super().__init__()
+        self.expand   = nn.Linear(d_model, M, bias=False)   # activation path (W in act(xW))
+        self.up       = nn.Linear(d_model, M, bias=False)   # value path (V in · xV)
+        self.contract = nn.Linear(M, d_output, bias=False)
+        self.activation = activation()
+        self.dropout = nn.Dropout(dropout)
+
+    def _init_weights(self):
+        # Identity-at-init: branch is null since contract = 0.
+        torch.nn.init.orthogonal_(self.expand.weight)
+        torch.nn.init.orthogonal_(self.up.weight)
+        torch.nn.init.zeros_(self.contract.weight)
+
+    def forward(self, x):
+        return self.dropout(self.contract(self.activation(self.expand(x)) * self.up(x)))
 
 
 class DoubleUDLP(Layer):
