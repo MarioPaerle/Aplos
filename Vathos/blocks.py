@@ -1850,6 +1850,18 @@ class PiCOBlock(BlockX0):
         x = x + (cm.generate(h) if cm.has_custom_generate() else cm(h))
         return x + self.x0_lambda * x0
 
+    def graph_generate(self, x: torch.Tensor, x0: torch.Tensor,
+                       pos: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """CUDA-graph friendly single-token block step (attention spatial mixer
+        only, value-embeddings ignored). Mirrors ``generate`` but routes the spatial
+        mixer through its ``graph_generate`` (full-buffer masked SDPA)."""
+        h = self.norm1(x)
+        x = x + self.spatial_mixer.graph_generate(h, pos, mask)
+        h = self.norm2(x)
+        cm = self.channel_mixer
+        x = x + (cm.generate(h) if cm.has_custom_generate() else cm(h))
+        return x + self.x0_lambda * x0
+
 
 class PiCOFormer(VathosModel):
     """High-level transformer. Ultra-efficient, modular, x0-skip nativo.
@@ -2085,6 +2097,245 @@ class PiCOFormer(VathosModel):
 
         self._clear_caches()
         return generated
+
+    @torch.no_grad()
+    def _setup_static_caches(self, batch: int, max_len: int, device, dtype):
+        """Install a preallocated :class:`StaticKVCache` on every attention mixer.
+
+        Walks the block stack and calls ``setup_static_cache`` on any spatial mixer
+        that supports it (MHA / GQA). Mixers without the method are left alone — but
+        for GRPO the model should use attention mixers only (the no-``generate``
+        mixers silently fall back to a stateless ``forward`` on a 1-token slice and
+        would corrupt rollouts, so ``generate_grpo`` is intended for attention/GQA
+        PiCOFormers).
+        """
+        for block in self.blocks:
+            sm = block.spatial_mixer
+            if hasattr(sm, "setup_static_cache"):
+                sm.setup_static_cache(batch, max_len, device, dtype)
+
+    @torch.no_grad()
+    def generate_grpo(self, prompt: torch.Tensor, max_new_tokens: int, *,
+                      group_size: int = 1, temperature: float = 1.0,
+                      top_k: int | None = None, top_p: float = 1.0,
+                      eos_token_id: int | None = None, pad_token_id: int = 0,
+                      return_logprobs: bool = True, compile_decode: bool = False):
+        """Fast batched rollout generation for GRPO, with a preallocated KV cache.
+
+        Built for the GRPO inner loop: replicate each prompt ``group_size`` times,
+        decode all rollouts in one batched pass over a :class:`StaticKVCache` (no
+        per-step ``torch.cat``), track per-sequence EOS, and optionally return the
+        per-token sampling log-prob of the behaviour policy ``pi_old``.
+
+        The companion scoring pass is :func:`sequence_logprobs` (call it with grad
+        for ``pi_theta`` and under no-grad for ``pi_ref`` on the returned
+        ``sequences``); reward comes from your verifier (e.g. the SymPy
+        ``calc_verifier`` on the decoded completions). Group-normalise the rewards
+        and you have the GRPO advantage.
+
+        Constraints (v1, chosen for speed/simplicity):
+          * ``prompt`` rows must be **equal length** (the natural GRPO case is one
+            prompt replicated ``group_size`` times). For ragged prompts, left-pad to
+            equal length first — a padding-mask path is future work.
+          * Intended for PiCOFormers whose spatial mixers are attention/GQA. Value
+            embeddings are not used on this path.
+          * If a non-Identity ``smear_gate`` is set, use ``smear_gate_lookback >= 1``
+            (the smear mixes the previous token; lookback 0 makes the fast path
+            disagree with ``forward``). A one-shot warning fires otherwise.
+
+        Args:
+            prompt: ``[P]`` or ``[B, P]`` token ids (equal-length rows).
+            max_new_tokens: number of completion tokens to generate.
+            group_size: ``G`` — each prompt row is replicated ``G`` times.
+            temperature, top_k, top_p: sampling controls.
+            eos_token_id: stop a row once it emits this id (its mask stays 1 through
+                the EOS token, 0 afterwards). ``None`` = always run ``max_new_tokens``.
+            pad_token_id: filler fed to already-finished rows (masked out anyway).
+            return_logprobs: also return per-token ``pi_old`` log-probs.
+
+        Returns: dict with
+            ``sequences``         ``[B*G, P + T]`` prompt + completion,
+            ``completions``       ``[B*G, T]`` generated part only,
+            ``completion_mask``   ``[B*G, T]`` 1 for real tokens (<= EOS) else 0,
+            ``sampling_logprobs`` ``[B*G, T]`` ``pi_old`` log-probs (or ``None``).
+                These are ``log pi(token)`` under the **temperature-1.0** policy
+                (raw logits), matching :func:`sequence_logprobs` exactly — so the
+                GRPO importance ratio is 1 at init for any sampling temperature.
+                NOTE: this is *not* the logprob under a truncated (top-k/top-p)
+                sampling distribution; if you sample with top-k/top-p and need the
+                ratio to reflect that truncation, recompute both legs consistently.
+            ``prompt_len``        ``int`` P.
+        """
+        self.eval()
+        self._clear_caches()
+
+        # Smear-gate correctness guard (mirrors generate()).
+        if (self.smear_gate is not None
+                and not isinstance(self.smear_gate, nn.Identity)
+                and self._smear_lookback < 1
+                and not self._smear_gate_warned):
+            import warnings
+            warnings.warn(
+                "PiCOFormer.generate_grpo: non-Identity smear_gate with "
+                "smear_gate_lookback < 1 — the cached fast path will disagree with "
+                "forward(). Set smear_gate_lookback=1 (or use a plain Identity smear).",
+                RuntimeWarning, stacklevel=2,
+            )
+            self._smear_gate_warned = True
+
+        if not (0 <= pad_token_id < self.vocab_size):
+            raise ValueError(
+                f"pad_token_id ({pad_token_id}) must be a valid token id in "
+                f"[0, {self.vocab_size}); it is fed to finished rows and must embed."
+            )
+
+        if prompt.dim() == 1:
+            prompt = prompt.unsqueeze(0)
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        prompt = prompt.to(device)
+        if group_size > 1:
+            prompt = prompt.repeat_interleave(group_size, dim=0)   # [B*G, P]
+
+        BG, P = prompt.shape
+        T = max_new_tokens
+        self._setup_static_caches(BG, P + T, device, dtype)
+
+        # --- Prefill: one pass over the whole prompt populates every cache ----
+        x0_raw = self.embedder(prompt)
+        if self.smear_gate is not None:
+            x0 = self.smear_gate(x0_raw)
+            if self._smear_lookback > 0:
+                self._x_window = x0_raw[:, -self._smear_lookback:, :].clone()
+        else:
+            x0 = x0_raw
+        ves = self._compute_ves(prompt)
+        x = x0
+        for i, block in enumerate(self.blocks):
+            x = block.generate(x, x0, ve=ves[i])
+        logits = self.unembedder(self.final_norm(x))[:, -1, :]
+        if self.softcap > 0:
+            logits = self.softcap * torch.tanh(logits / self.softcap)
+
+        # --- Optional CUDA-graph / torch.compile decode setup -----------------
+        # The graph path attends over the full preallocated buffer with a position
+        # mask (static shapes) and threads `pos` as a tensor, so torch.compile(mode=
+        # "reduce-overhead") captures one CUDA graph and replays it every step,
+        # removing the per-token Python + kernel-launch overhead. v1 is attention-
+        # only and does not support a non-Identity smear gate on this path.
+        decode_fn = None
+        if compile_decode:
+            if self.smear_gate is not None and not isinstance(self.smear_gate, nn.Identity):
+                raise NotImplementedError(
+                    "compile_decode=True does not yet support a non-Identity smear "
+                    "gate. Use compile_decode=False, or an Identity smear gate."
+                )
+            for block in self.blocks:
+                sm = block.spatial_mixer
+                if not hasattr(sm, "graph_generate"):
+                    raise NotImplementedError(
+                        f"compile_decode=True requires attention/GQA spatial mixers "
+                        f"with graph_generate; {type(sm).__name__} lacks it."
+                    )
+                if getattr(sm, "pos_emb", None) is not None and hasattr(sm.pos_emb, "prebuild"):
+                    sm.pos_emb.prebuild(P + T, device, dtype)
+            arange_buf = torch.arange(P + T, device=device)
+
+            def _graph_decode(token, pos):
+                m = (arange_buf <= pos).view(1, 1, 1, -1)
+                x0t = self.embedder(token)
+                xt = x0t
+                for blk in self.blocks:
+                    xt = blk.graph_generate(xt, x0t, pos, m)
+                lg = self.unembedder(self.final_norm(xt))[:, -1, :]
+                if self.softcap > 0:
+                    lg = self.softcap * torch.tanh(lg / self.softcap)
+                return lg
+
+            decode_fn = torch.compile(_graph_decode, mode="reduce-overhead",
+                                      fullgraph=False)
+
+        # --- Output buffers ---------------------------------------------------
+        # Pre-fill completions with pad (NOT torch.empty): if an early break leaves
+        # trailing positions unwritten, they must be a valid in-vocab id so a later
+        # sequence_logprobs(sequences) forward doesn't index the embedder out of range.
+        completions = torch.full((BG, T), pad_token_id, dtype=torch.long, device=device)
+        completion_mask = torch.zeros(BG, T, device=device)
+        sampling_logprobs = (torch.zeros(BG, T, device=device)
+                             if return_logprobs else None)
+        finished = torch.zeros(BG, dtype=torch.bool, device=device)
+
+        for t in range(T):
+            active = ~finished
+            # Sample one token per row from the current (last-position) logits.
+            token = sample_next_token(logits, temperature, top_k, top_p).squeeze(1)
+            if return_logprobs:
+                # log pi_old under the temperature-1.0 policy (RAW logits) — the same
+                # definition sequence_logprobs uses for pi_theta, so the GRPO ratio is
+                # exactly 1 at init regardless of sampling temperature. (Sampling
+                # temperature is treated as exploration, not part of the policy.)
+                lp = selective_log_softmax(logits, token)
+
+            # Finished rows emit pad; their token/logprob are masked out.
+            token = torch.where(active, token, token.new_full((), pad_token_id))
+            completions[:, t] = token
+            completion_mask[:, t] = active.float()
+            if return_logprobs:
+                sampling_logprobs[:, t] = torch.where(active, lp, lp.new_zeros(()))
+
+            if eos_token_id is not None:
+                finished = finished | (active & (token == eos_token_id))
+                if bool(finished.all()):
+                    break
+            if t == T - 1:
+                break
+
+            # --- Decode step: feed `token` to get the next-position logits ----
+            next_in = token.unsqueeze(1)                       # [BG, 1]
+            if decode_fn is not None:
+                # Graph path: write/attend at absolute position P + t (tensor).
+                pos = torch.full((1,), P + t, dtype=torch.long, device=device)
+                logits = decode_fn(next_in, pos)
+                continue
+
+            x0_t_raw = self.embedder(next_in)
+            if self.smear_gate is not None:
+                if self._smear_lookback > 0:
+                    combined = torch.cat([self._x_window, x0_t_raw], dim=1)
+                    x0_t = self.smear_gate(combined)[:, -1:, :]
+                    self._x_window = combined[:, -self._smear_lookback:, :]
+                else:
+                    x0_t = self.smear_gate(x0_t_raw)
+            else:
+                x0_t = x0_t_raw
+            ves_t = self._compute_ves(next_in)
+            x_t = x0_t
+            for i, block in enumerate(self.blocks):
+                x_t = block.generate(x_t, x0_t, ve=ves_t[i])
+            logits = self.unembedder(self.final_norm(x_t))[:, -1, :]
+            if self.softcap > 0:
+                logits = self.softcap * torch.tanh(logits / self.softcap)
+
+        self._clear_caches()
+
+        sequences = torch.cat([prompt, completions], dim=1)
+        return {
+            "sequences": sequences,
+            "completions": completions,
+            "completion_mask": completion_mask,
+            "sampling_logprobs": sampling_logprobs,
+            "prompt_len": P,
+        }
+
+    def sequence_logprobs(self, sequences: torch.Tensor) -> torch.Tensor:
+        """Thin method wrapper over :func:`Vathos.functions.sequence_logprobs`.
+
+        Returns ``[B, L-1]`` per-token log-probs of the realised next tokens under
+        this model. Call with grad for ``pi_theta``; wrap in ``torch.no_grad()`` for
+        ``pi_ref``. ``forward`` already applies the logit softcap, so the log-probs
+        are taken under the actual policy.
+        """
+        return sequence_logprobs(self, sequences)
 
 
 # =============================================================================
