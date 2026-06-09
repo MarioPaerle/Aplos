@@ -474,6 +474,52 @@ def zero_layer_mtp_loss( # TODO: Vibecoded for now
     return total_loss
 
 
+def selective_log_softmax(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """Per-token log-probability of ``index`` under ``logits`` — the GRPO primitive.
+
+    ``log_softmax(logits)[..., index]`` without materialising the full
+    ``[..., V]`` log-softmax tensor: computes ``logit[index] - logsumexp(logits)``
+    in fp32 for stability. This is exactly the quantity GRPO needs for both the
+    policy ``log pi_theta(o_t | ...)`` and the reference ``log pi_ref(o_t | ...)``.
+
+    Args:
+        logits: ``[..., V]`` next-token logits (softcap already applied if used).
+        index:  ``[...]`` realised token ids (same leading shape as ``logits``).
+
+    Returns:
+        ``[...]`` per-position log-probabilities (fp32).
+    """
+    logits = logits.float()
+    lse = torch.logsumexp(logits, dim=-1)
+    chosen = logits.gather(dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+    return chosen - lse
+
+
+def sequence_logprobs(model, sequences: torch.Tensor,
+                      ignore_softcap: bool = False) -> torch.Tensor:
+    """Per-token log-prob of each *realised* next token under ``model``.
+
+    Runs one ``model.forward`` over the full sequence and gathers the log-prob of
+    the actually-present next token at every position. This is the GRPO *scoring*
+    pass: call it **with grad** for the current policy ``pi_theta`` and **under
+    ``torch.no_grad()``** for the frozen reference ``pi_ref``. Pair the output with
+    the ``completion_mask`` from :meth:`PiCOFormer.generate_grpo` so only generated
+    tokens contribute to the loss.
+
+    Args:
+        model: a PiCOFormer (or any model whose ``forward(ids) -> [B, L, V]`` logits
+               already include the final softcap, as PiCOFormer's does).
+        sequences: ``[B, L]`` token ids (prompt + completion).
+
+    Returns:
+        ``[B, L-1]`` log-probs aligned so ``out[:, t] = log p(seq[:, t+1] | seq[:, :t+1])``.
+    """
+    logits = model(sequences)            # [B, L, V] — softcap applied inside forward
+    logits = logits[:, :-1, :]           # predict token t+1 from context <= t
+    targets = sequences[:, 1:]           # [B, L-1]
+    return selective_log_softmax(logits, targets)
+
+
 def plot_tensor_diagnostics(
         name: str,
         tensor: torch.Tensor,

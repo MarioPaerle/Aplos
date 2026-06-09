@@ -88,6 +88,34 @@ class RoPE(Layer):
 
         return (q_rope, k_rope) if k_rope is not None else q_rope
 
+    # --- CUDA-graph / torch.compile friendly single-token rotation ----------- #
+    # The slicing `cos[start_pos:start_pos+L]` and the lazy `_update_cache` both
+    # read a Python int, which forces torch.compile to recompile every decode
+    # step (the position changes 0,1,2,...). For the graph-captured decode path we
+    # (a) pre-build the cos/sin tables once to max_len, and (b) rotate a single
+    # token at a *tensor* position via index_select — no Python int in the graph.
+
+    def prebuild(self, max_len: int, device, dtype):
+        """Materialise cos/sin tables to `max_len` so the graph path only indexes."""
+        t = torch.arange(max_len, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq.to(device).float())
+        self._cos_cached = freqs.cos().to(dtype)
+        self._sin_cached = freqs.sin().to(dtype)
+        self._seq_len_cached = max_len
+
+    def rotate_at(self, q: torch.Tensor, k: torch.Tensor, pos: torch.Tensor):
+        """Rotate single-token q,k ([B,H,1,Dh]) at absolute position `pos` (long
+        tensor, shape [1]). Requires `prebuild()` to have been called. Graph-safe:
+        only index_select on the prebuilt tables, no Python-int control flow."""
+        cos = self._cos_cached.index_select(0, pos).view(1, 1, 1, self.dim // 2)
+        sin = self._sin_cached.index_select(0, pos).view(1, 1, 1, self.dim // 2)
+
+        def rot(x):
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+
+        return rot(q), rot(k)
+
 
 class ALiBi(Layer):
     __name__ = "ALiBi"
@@ -288,6 +316,45 @@ class NanoYaRN(Layer):
         self.attn_scale *= 0.2 * math.log(new_window / old_window) + 1
 
 
+class StaticKVCache:
+    """Preallocated KV cache for fast batched decode — no per-step ``torch.cat``.
+
+    The default ``generate()`` path grows its cache with ``torch.cat([cache, new])``
+    on every decoded token: that reallocates and copies the *whole* cache each step,
+    so a length-``T`` rollout pays ``O(T^2)`` memory traffic and hammers the CUDA
+    allocator. ``StaticKVCache`` allocates the buffer once to ``[B, H, max_len, D]``
+    and writes each new K/V into a slice in place; attention then reads the
+    ``[:, :, :pos]`` view. This is the gpt-fast / llama static-cache pattern and is
+    the single biggest win for GRPO rollouts (many fixed-length decodes per group).
+
+    Stored in a mixer's ``self.kv_cache`` slot in place of the ``(k, v)`` tuple; the
+    mixer's ``generate()`` detects the type and takes the in-place path. Use
+    ``mixer.setup_static_cache(...)`` to install one and ``clear_cache()`` to drop it.
+    """
+    __slots__ = ("k", "v", "pos", "max_len")
+
+    def __init__(self, batch: int, n_kv_heads: int, max_len: int, head_dim: int,
+                 device, dtype):
+        self.k = torch.zeros(batch, n_kv_heads, max_len, head_dim,
+                             device=device, dtype=dtype)
+        self.v = torch.zeros(batch, n_kv_heads, max_len, head_dim,
+                             device=device, dtype=dtype)
+        self.pos = 0
+        self.max_len = max_len
+
+    def append(self, k_new: torch.Tensor, v_new: torch.Tensor):
+        """Write ``k_new``/``v_new`` ``[B,H,L,D]`` at the cursor; return ``[:, :, :pos]``.
+
+        The caller guarantees ``pos + L <= max_len`` (the generation loop sizes the
+        cache to ``prompt_len + max_new_tokens``), so the hot path skips bounds checks.
+        """
+        end = self.pos + k_new.shape[2]
+        self.k[:, :, self.pos:end, :] = k_new
+        self.v[:, :, self.pos:end, :] = v_new
+        self.pos = end
+        return self.k[:, :, :end, :], self.v[:, :, :end, :]
+
+
 class MultiheadAttentionMixer(Layer):
     __name__ = "MultiheadAttentionMixer"
     __complexity__ = "O(L^2 d + L d^2)"
@@ -375,6 +442,17 @@ class MultiheadAttentionMixer(Layer):
         out = self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
         return out, attn_weights
 
+    def setup_static_cache(self, batch: int, max_len: int, device, dtype):
+        """Install a preallocated :class:`StaticKVCache` for fast batched decode.
+
+        Sizes the buffer to ``[batch, n_heads, max_len, head_dim]``. Call once before
+        a generation run (e.g. from ``PiCOFormer.generate_grpo``); ``clear_cache()``
+        drops it back to the default dynamic behaviour.
+        """
+        self.kv_cache = StaticKVCache(
+            batch, self.n_heads, max_len, self.head_dim, device, dtype,
+        )
+
     def generate(self, x: torch.Tensor, ve=None) -> torch.Tensor:
         B, L, D = x.shape
 
@@ -386,7 +464,13 @@ class MultiheadAttentionMixer(Layer):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+        # pos_offset (for RoPE start_pos) works for both cache flavours.
+        if isinstance(self.kv_cache, StaticKVCache):
+            pos_offset = self.kv_cache.pos
+        elif self.kv_cache is not None:
+            pos_offset = self.kv_cache[0].shape[2]
+        else:
+            pos_offset = 0
 
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=pos_offset)
@@ -394,17 +478,55 @@ class MultiheadAttentionMixer(Layer):
         if ve is not None:
             v = v + ve.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
 
-        if self.kv_cache is not None:
+        if isinstance(self.kv_cache, StaticKVCache):
+            # In-place write into the preallocated buffer (no realloc/copy).
+            k, v = self.kv_cache.append(k, v)
+        elif self.kv_cache is not None:
+            # Dynamic fallback: grow with torch.cat (O(T^2), back-compat default).
             k_cache, v_cache = self.kv_cache
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
-
-        self.kv_cache = (k, v)
+            self.kv_cache = (k, v)
+        else:
+            self.kv_cache = (k, v)
 
         attn = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=self.causal and (L > 1),
             dropout_p=0.0,
+        )
+        return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
+
+    def graph_generate(self, x: torch.Tensor, pos: torch.Tensor,
+                       mask: torch.Tensor) -> torch.Tensor:
+        """CUDA-graph / torch.compile friendly single-token decode.
+
+        Unlike ``generate`` (which reads a growing ``[:, :, :pos]`` slice and a
+        Python-int ``pos`` — both force recompilation every step), this attends over
+        the **full** preallocated buffer with a boolean ``mask`` and writes the new
+        K/V at the **tensor** position ``pos`` via ``index_copy_``. Every step has
+        identical shapes and no Python-int control flow, so ``torch.compile(mode=
+        "reduce-overhead")`` captures one CUDA graph and replays it. Requires a
+        :class:`StaticKVCache` installed and ``pos_emb.prebuild(...)`` done.
+
+        Args:
+            x:    ``[B, 1, D]`` the single new token's hidden state.
+            pos:  long tensor ``[1]`` — absolute position to write/attend up to.
+            mask: bool ``[1, 1, 1, max_len]`` — True for positions <= pos.
+        """
+        B, L, D = x.shape
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.pos_emb is not None:
+            q, k = self.pos_emb.rotate_at(q, k, pos)
+        self.kv_cache.k.index_copy_(2, pos, k)
+        self.kv_cache.v.index_copy_(2, pos, v)
+        attn = F.scaled_dot_product_attention(
+            q, self.kv_cache.k, self.kv_cache.v, attn_mask=mask,
         )
         return self.out(attn.transpose(1, 2).contiguous().view(B, L, D))
 
@@ -1384,6 +1506,17 @@ class GroupedQueryAttention(Layer):
         )
         return self.o_proj(attn.transpose(1, 2).contiguous().view(B, T, C))
 
+    def setup_static_cache(self, batch: int, max_len: int, device, dtype):
+        """Install a preallocated :class:`StaticKVCache` sized for GQA.
+
+        The buffer caches the *compact* K/V (``n_kv_heads`` heads), so its memory is
+        ``n_rep``x smaller than full MHA — the main reason to prefer GQA for GRPO
+        rollouts. Expansion to ``n_heads`` happens after the cache read, per step.
+        """
+        self.kv_cache = StaticKVCache(
+            batch, self.n_kv_heads, max_len, self.head_dim, device, dtype,
+        )
+
     def generate(self, x: torch.Tensor, ve=None) -> torch.Tensor:
         B, T, C = x.shape
 
@@ -1397,7 +1530,12 @@ class GroupedQueryAttention(Layer):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+        if isinstance(self.kv_cache, StaticKVCache):
+            pos_offset = self.kv_cache.pos
+        elif self.kv_cache is not None:
+            pos_offset = self.kv_cache[0].shape[2]
+        else:
+            pos_offset = 0
 
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=pos_offset)
@@ -1408,12 +1546,16 @@ class GroupedQueryAttention(Layer):
                 "use MultiheadAttentionMixer if you need ve."
             )
 
-        if self.kv_cache is not None:
+        if isinstance(self.kv_cache, StaticKVCache):
+            # Cache the compact (n_kv_heads) K/V in place, then expand for SDPA.
+            k, v = self.kv_cache.append(k, v)
+        elif self.kv_cache is not None:
             k_cache, v_cache = self.kv_cache
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
-
-        self.kv_cache = (k, v)
+            self.kv_cache = (k, v)
+        else:
+            self.kv_cache = (k, v)
 
         k, v = self._expand_kv(k), self._expand_kv(v)
 
@@ -1423,6 +1565,31 @@ class GroupedQueryAttention(Layer):
             dropout_p=0.0,
         )
         return self.o_proj(attn.transpose(1, 2).contiguous().view(B, T, C))
+
+    def graph_generate(self, x: torch.Tensor, pos: torch.Tensor,
+                       mask: torch.Tensor) -> torch.Tensor:
+        """CUDA-graph / torch.compile friendly single-token GQA decode.
+
+        Caches the compact (n_kv_heads) K/V in place at the tensor position ``pos``,
+        attends over the full preallocated buffer with a boolean ``mask`` after
+        expanding K/V to n_heads. See ``MultiheadAttentionMixer.graph_generate``.
+        """
+        B, L, C = x.shape
+        q = self.q_proj(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        kv = self.kv_proj(x).view(B, L, self.n_kv_heads, 2, self.head_dim)
+        k, v = kv.unbind(dim=3)
+        k, v = k.transpose(1, 2), v.transpose(1, 2)
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.pos_emb is not None:
+            q, k = self.pos_emb.rotate_at(q, k, pos)
+        self.kv_cache.k.index_copy_(2, pos, k)
+        self.kv_cache.v.index_copy_(2, pos, v)
+        k_full = self._expand_kv(self.kv_cache.k)
+        v_full = self._expand_kv(self.kv_cache.v)
+        attn = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask)
+        return self.o_proj(attn.transpose(1, 2).contiguous().view(B, L, C))
 
     def clear_cache(self):
         self.kv_cache = None
