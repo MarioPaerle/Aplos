@@ -14,7 +14,8 @@ import torch
 import torch.nn.functional as F
 
 from Vathos.blocks import PiCOFormer, SmearGate
-from Vathos._spatials import MultiheadAttentionMixer, GroupedQueryAttention, RoPE
+from Vathos._spatials import (MultiheadAttentionMixer, GroupedQueryAttention,
+                              MultiheadGatedAttentionMixer, RoPE)
 from Vathos._basics import Builder
 from Vathos.functions import sequence_logprobs, selective_log_softmax, simple_ar_generate
 import Vathos.blocks as blocks_mod
@@ -36,6 +37,10 @@ def build_model(kind="mha", *, smear=False, vocab=80, d_model=64, n_layers=3, se
     elif kind == "gqa":
         sp = Builder(GroupedQueryAttention, n_heads=n_heads, n_kv_heads=2,
                      causal=True, pos_emb=RoPE(head_dim), qk_norm=True)
+    elif kind == "gated":
+        # Guido's spatial mixer: MHA + sparse per-head output gate, qk_norm, RoPE.
+        sp = Builder(MultiheadGatedAttentionMixer, n_heads=n_heads, causal=True,
+                     pos_emb=RoPE(head_dim), qk_norm=True, gate_input_dim=12)
     else:
         raise ValueError(kind)
     smear_gate = SmearGate(d_model) if smear else None
@@ -107,7 +112,7 @@ def test_A_cache_equals_forward():
     """StaticKVCache decode logits == full forward() logits (the cache invariant)."""
     print("\n[A] StaticKVCache decode == forward() — per-position logits")
     ok = True
-    for kind in ("mha", "gqa"):
+    for kind in ("mha", "gqa", "gated"):
         for smear in (False, True):
             m = build_model(kind, smear=smear, seed=1)
             torch.manual_seed(42)
@@ -139,7 +144,7 @@ def test_B_grpo_matches_reference():
     blocks_mod.sample_next_token = greedy
     fns_mod.sample_next_token = greedy
     try:
-        for kind in ("mha", "gqa"):
+        for kind in ("mha", "gqa", "gated"):
             m = build_model(kind, seed=2)
             prompt = torch.tensor([3, 7, 1, 9, 2, 5])
             ref = simple_ar_generate(m, prompt, max_len=20, temperature=1.0,
@@ -324,9 +329,16 @@ def graph_forced_decode_logits(model, seq):
             sm.pos_emb.prebuild(L, device, dtype)
     arange = torch.arange(L, device=device)
 
+    smear_on = (model.smear_gate is not None and model._smear_lookback > 0)
+
     outs = []
     # Prefill position 0 via the slice path (fills cache[0]); pos advances to 1.
-    x0 = model.embedder(seq[:, :1])
+    x0_raw = model.embedder(seq[:, :1])
+    if smear_on:
+        x0 = model.smear_gate(x0_raw)               # L==1 → no-op, but mirrors prefill
+        model._x_window = x0_raw[:, -model._smear_lookback:, :].clone()
+    else:
+        x0 = x0_raw
     x = x0
     for blk in model.blocks:
         x = blk.generate(x, x0, ve=None)
@@ -334,11 +346,17 @@ def graph_forced_decode_logits(model, seq):
     if model.softcap > 0:
         lg = model.softcap * torch.tanh(lg / model.softcap)
     outs.append(lg)
-    # Decode positions 1..L-1 via the graph path.
+    # Decode positions 1..L-1 via the graph path (mirrors generate_grpo._graph_decode).
     for t in range(1, L):
         pos = torch.tensor([t], device=device)
         mask = (arange <= pos).view(1, 1, 1, -1)
-        x0t = model.embedder(seq[:, t:t + 1])
+        x0t_raw = model.embedder(seq[:, t:t + 1])
+        if smear_on:
+            combined = torch.cat([model._x_window, x0t_raw], dim=1)
+            x0t = model.smear_gate(combined)[:, -1:, :]
+            model._x_window.copy_(combined[:, -model._smear_lookback:, :])
+        else:
+            x0t = x0t_raw
         xt = x0t
         for blk in model.blocks:
             xt = blk.graph_generate(xt, x0t, pos, mask)
@@ -355,16 +373,18 @@ def test_I_graph_path_equals_forward():
     RoPE) == full forward(). This is the correctness invariant for compile_decode."""
     print("\n[I] graph_generate decode (full-buffer mask) == forward()")
     ok = True
-    for kind in ("mha", "gqa"):
-        m = build_model(kind, smear=False, seed=11)
-        torch.manual_seed(99)
-        seq = torch.randint(0, m.vocab_size, (3, 28))
-        full = m(seq)
-        graph = graph_forced_decode_logits(m, seq)
-        max_diff = (full - graph).abs().max().item()
-        passed = max_diff < 1e-4 and full.std().item() > 0.5
-        ok &= passed
-        print(f"    {kind:4s}  max|Δlogit|={max_diff:.2e} -> {'PASS' if passed else 'FAIL'}")
+    for kind in ("mha", "gqa", "gated"):
+        for smear in (False, True):
+            m = build_model(kind, smear=smear, seed=11)
+            torch.manual_seed(99)
+            seq = torch.randint(0, m.vocab_size, (3, 28))
+            full = m(seq)
+            graph = graph_forced_decode_logits(m, seq)
+            max_diff = (full - graph).abs().max().item()
+            passed = max_diff < 1e-4 and full.std().item() > 0.5
+            ok &= passed
+            print(f"    {kind:5s} smear={smear!s:5s}  max|Δlogit|={max_diff:.2e} "
+                  f"-> {'PASS' if passed else 'FAIL'}")
     return ok
 
 
