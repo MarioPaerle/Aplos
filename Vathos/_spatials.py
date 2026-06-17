@@ -608,6 +608,16 @@ class MultiheadGatedAttentionMixer(Layer):
         attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
         return self.out(attn.transpose(1, 2).reshape(B, L, D))
 
+    def setup_static_cache(self, batch: int, max_len: int, device, dtype):
+        """Install a preallocated :class:`StaticKVCache` for fast batched decode.
+
+        Identical to :meth:`MultiheadAttentionMixer.setup_static_cache` — the gate
+        is applied *after* SDPA and needs no cache, so the KV path matches plain MHA.
+        """
+        self.kv_cache = StaticKVCache(
+            batch, self.n_heads, max_len, self.head_dim, device, dtype,
+        )
+
     def generate(self, x: torch.Tensor, ve=None) -> torch.Tensor:
         B, L, D = x.shape
         qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
@@ -618,17 +628,30 @@ class MultiheadGatedAttentionMixer(Layer):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+        # pos_offset (for RoPE start_pos) works for both cache flavours.
+        if isinstance(self.kv_cache, StaticKVCache):
+            pos_offset = self.kv_cache.pos
+        elif self.kv_cache is not None:
+            pos_offset = self.kv_cache[0].shape[2]
+        else:
+            pos_offset = 0
+
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, start_pos=pos_offset)
         if ve is not None:
             v = v + ve.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
 
-        if self.kv_cache is not None:
+        if isinstance(self.kv_cache, StaticKVCache):
+            # In-place write into the preallocated buffer (no realloc/copy).
+            k, v = self.kv_cache.append(k, v)
+        elif self.kv_cache is not None:
+            # Dynamic fallback: grow with torch.cat (O(T^2), back-compat default).
             k_cache, v_cache = self.kv_cache
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
-        self.kv_cache = (k, v)
+            self.kv_cache = (k, v)
+        else:
+            self.kv_cache = (k, v)
 
         attn = F.scaled_dot_product_attention(
             q, k, v, is_causal=self.causal and (L > 1), dropout_p=0.0,
@@ -636,8 +659,39 @@ class MultiheadGatedAttentionMixer(Layer):
         attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
         return self.out(attn.transpose(1, 2).reshape(B, L, D))
 
+    def graph_generate(self, x: torch.Tensor, pos: torch.Tensor,
+                       mask: torch.Tensor) -> torch.Tensor:
+        """CUDA-graph / torch.compile friendly single-token gated decode.
+
+        Same as :meth:`MultiheadAttentionMixer.graph_generate` (full-buffer masked
+        SDPA + ``index_copy_`` + tensor-pos RoPE) with the sparse per-head output
+        gate applied after attention. The gate reads ``x[..., :gate_input_dim]``,
+        i.e. the same (post-norm1) hidden the eager ``generate``/``forward`` use.
+        """
+        B, L, D = x.shape
+        qkv = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.pos_emb is not None:
+            q, k = self.pos_emb.rotate_at(q, k, pos)
+        self.kv_cache.k.index_copy_(2, pos, k)
+        self.kv_cache.v.index_copy_(2, pos, v)
+        attn = F.scaled_dot_product_attention(
+            q, self.kv_cache.k, self.kv_cache.v, attn_mask=mask,
+        )
+        attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+        return self.out(attn.transpose(1, 2).reshape(B, L, D))
+
     def clear_cache(self):
         self.kv_cache = None
+
+    def finetune(self):
+        self.qkv.weight.requires_grad = False
+        self.out.weight.requires_grad = False
+        self.gate_proj.weight.requires_grad = False
 
 
 class MultiheadAttentionMixerALIBI(Layer):

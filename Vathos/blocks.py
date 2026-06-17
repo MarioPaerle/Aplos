@@ -2225,11 +2225,6 @@ class PiCOFormer(VathosModel):
         # only and does not support a non-Identity smear gate on this path.
         decode_fn = None
         if compile_decode:
-            if self.smear_gate is not None and not isinstance(self.smear_gate, nn.Identity):
-                raise NotImplementedError(
-                    "compile_decode=True does not yet support a non-Identity smear "
-                    "gate. Use compile_decode=False, or an Identity smear gate."
-                )
             for block in self.blocks:
                 sm = block.spatial_mixer
                 if not hasattr(sm, "graph_generate"):
@@ -2241,9 +2236,30 @@ class PiCOFormer(VathosModel):
                     sm.pos_emb.prebuild(P + T, device, dtype)
             arange_buf = torch.arange(P + T, device=device)
 
+            # A non-Identity smear gate is threaded through the captured graph as a
+            # fixed-shape rolling window of raw token embeddings (`self._x_window`,
+            # [BG, lookback, D], allocated by the prefill above), updated in place
+            # via copy_ — the same static-buffer trick the KV cache uses, so
+            # torch.compile(reduce-overhead) still captures one CUDA graph.
+            _graph_smear = (self.smear_gate is not None
+                            and not isinstance(self.smear_gate, nn.Identity))
+            if _graph_smear and self._smear_lookback < 1:
+                raise NotImplementedError(
+                    "compile_decode=True with a non-Identity smear gate requires "
+                    "smear_gate_lookback >= 1 (the smear mixes the previous token)."
+                )
+
             def _graph_decode(token, pos):
                 m = (arange_buf <= pos).view(1, 1, 1, -1)
-                x0t = self.embedder(token)
+                x0t_raw = self.embedder(token)
+                if _graph_smear:
+                    # combined: [BG, lookback+1, D]; smear the new (last) token using
+                    # the window, then roll the window in place (no realloc).
+                    combined = torch.cat([self._x_window, x0t_raw], dim=1)
+                    x0t = self.smear_gate(combined)[:, -1:, :]
+                    self._x_window.copy_(combined[:, -self._smear_lookback:, :])
+                else:
+                    x0t = x0t_raw
                 xt = x0t
                 for blk in self.blocks:
                     xt = blk.graph_generate(xt, x0t, pos, m)
