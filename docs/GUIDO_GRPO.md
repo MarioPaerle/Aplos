@@ -62,18 +62,37 @@ e `gated_mha` è la sua esatta classe di attention. Servivano 3 cose:
    (q_proj/kv_proj separati) è un'altra classe → forward incompatibile.
 3. **Converter pesi**: solo strip del prefisso `backbone.` (nessuno split/rename).
 
-## Benchmark (A100 64GB, group=6, eager, `compile_decode=False`, `torch_leaky_reglu2`)
+## Loader turnkey
 
-Problema: *"Determine the closed form S(n) for the sum of every pair number up to n. ex: S(6)=2+4+6"*
+```python
+from Vathos.guido import load_guido
+model, cfg = load_guido("step_138000.pt")            # path locale; auto-rileva l'arch
+model, cfg = load_guido("Paerle/Guido-0.5B")         # da HF (scarica il .pt e converte)
+```
+`load_guido` deduce config (d_model/n_layers/n_heads/d_ff/gate_input_dim/smear) dallo state_dict,
+applica il converter (strip `backbone.`) e ritorna il modello pronto. Esempi end-to-end in
+[`examples/guido_grpo.py`](../examples/guido_grpo.py) e [`examples/guido_sft.py`](../examples/guido_sft.py).
 
-| framing | tok generati | tempo | tok/s |
+## Benchmark DECODE (A100 64GB, `torch_leaky_reglu2`)
+
+**Importante**: throughput di GENERAZIONE autoregressiva (decode), NON di training. I bench
+`pretrain_fwd_bwd` di Aplos (74k–107k tok/s) misurano il forward+backward in parallelo: metrica
+diversa, ~100× il decode per natura (il decode è sequenziale, memory-bound).
+
+| mode | group (batch) | tok/s aggregati | tok/s per-seq |
 |---|---|---|---|
-| MATH-wrapped (`### MATH\n\nProblem: …\nSolution: `) | 1536 | 6.57s | **234** |
-| RAW (nessun wrap) | 1498 | 5.57s | **269** |
+| eager (`compile_decode=False`) | 8 | 380 | 48 |
+| eager | 32 | 1,518 | 47 |
+| **compile (`compile_decode=True`)** | 8 | 1,500 | 188 |
+| **compile** | 32 | **4,588** | **143** |
 
-Osservazione: col **wrap MATH** il modello produce CoT strutturato in formato-soluzione
-(step numerati, LaTeX, `\boxed{}`); **senza wrap** divaga come testo web. Il modello è
-format-sensitive → per il GRPO usare il framing MATH-wrapped.
+`compile_decode=True` dà ~4× su eager. A group=32 compile → **~4.600 tok/s aggregati / ~143 per-seq**,
+nello stesso ordine di grandezza delle librerie ottimizzate (vLLM/TRT-LLM ~150–300 tok/s/seq a 0.5B).
+Per GRPO usare **`compile_decode=True`** e group grande (il group È il batch → più rollout E più throughput).
+
+Osservazione qualitativa (problema *"closed form S(n)…"*): col **wrap MATH** il modello produce CoT
+strutturato in formato-soluzione (step numerati, LaTeX, `\boxed{}`); **senza wrap** divaga come testo
+web. Il modello è format-sensitive → per il GRPO usare il framing MATH-wrapped.
 
 ## TODO (solo velocità, non correttezza)
 
