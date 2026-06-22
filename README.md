@@ -16,6 +16,43 @@ and APLOS will automatically become colorful!
 
 ---
 
+# Production PiCOFormer Fast Path
+
+For fast inference, GRPO rollout collection, and Triton FFN experiments, use the
+production-facing scaffold in `Vathos.picoformer`:
+
+```python
+import torch
+from Vathos.picoformer import PiCOFormerConfig, DecodeConfig, build_picoformer, prepare_for_inference
+
+cfg = PiCOFormerConfig(
+    vocab_size=49152,
+    d_model=1024,
+    n_layers=24,
+    n_heads=16,
+    n_kv_heads=4,
+    attention="gqa",
+    channel="triton_lrelu2_a100",
+)
+
+model = build_picoformer(cfg)
+model = prepare_for_inference(model, device="cuda", dtype=torch.bfloat16)
+
+decode = DecodeConfig(max_new_tokens=512, group_size=32, compile_decode=True)
+rollouts = model.generate_grpo(prompt, **decode.kwargs())
+```
+
+See [`docs/PICOFORMER_PRODUCTION.md`](docs/PICOFORMER_PRODUCTION.md) for the
+supported deployment path, checkpoint format, GRPO scoring helpers, and GPU
+benchmarks.
+
+For Guido-style A100 pretraining over the packed FineWeb-Edu/math shards, use
+[`train_A100.py`](train_A100.py). See [`docs/TRAIN_A100.md`](docs/TRAIN_A100.md)
+and [`data/README.md`](data/README.md) for the single-GPU SLURM command, data
+manifest, Muon optimizer split, GQA-gated/XSA switches, and loss-mode guidance.
+
+---
+
 # Vathos
 Vathos is a python library built on PyTorch whose aim is to accelerate the building of good level models for researchers, 
 exploiting the repeating structure of Deep Learning architectures.
@@ -155,4 +192,3 @@ model = SequenceModel(
     )
 
 ```
-

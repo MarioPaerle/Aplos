@@ -1440,6 +1440,12 @@ class GQAGatedMixer(Layer):
         attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
         return self.o_proj(attn.transpose(1, 2).reshape(B, T, D))
 
+    def setup_static_cache(self, batch: int, max_len: int, device, dtype):
+        """Install a compact static KV cache for fast gated-GQA decode."""
+        self.kv_cache = StaticKVCache(
+            batch, self.n_kv_heads, max_len, self.head_dim, device, dtype,
+        )
+
     def generate(self, x: torch.Tensor, ve: torch.Tensor = None) -> torch.Tensor:
         B, T, D = x.shape
 
@@ -1452,13 +1458,34 @@ class GQAGatedMixer(Layer):
             q = self.q_norm(q)
             k_new = self.k_norm(k_new)
 
-        pos_offset = self.kv_cache[0].shape[2] if self.kv_cache is not None else 0
+        if isinstance(self.kv_cache, StaticKVCache):
+            pos_offset = self.kv_cache.pos
+        elif self.kv_cache is not None:
+            pos_offset = self.kv_cache[0].shape[2]
+        else:
+            pos_offset = 0
         if self.pos_emb is not None:
             q, k_new = self.pos_emb(q, k_new, start_pos=pos_offset)
 
         # k is always cached raw (n_kv_heads). v cache format:
         # - if ve active: EXPANDED (n_heads), since ve is applied per-step
         # - else: raw (n_kv_heads), standard GQA
+        if isinstance(self.kv_cache, StaticKVCache):
+            if ve is not None:
+                raise NotImplementedError(
+                    "GQAGatedMixer static-cache decode does not support value embeddings; "
+                    "disable ve_groups or use a non-static decode path."
+                )
+            k_all, v_all = self.kv_cache.append(k_new, v_new)
+            k_for_attn = self._expand_kv(k_all)
+            v_for_attn = self._expand_kv(v_all)
+            attn = F.scaled_dot_product_attention(
+                q, k_for_attn, v_for_attn,
+                is_causal=self.causal and (T > 1), dropout_p=0.0,
+            )
+            attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+            return self.o_proj(attn.transpose(1, 2).reshape(B, T, D))
+
         if ve is not None:
             v_new = self._expand_kv(v_new) + ve.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
@@ -1476,6 +1503,27 @@ class GQAGatedMixer(Layer):
             q, k_for_attn, v_for_attn,
             is_causal=self.causal and (T > 1), dropout_p=0.0,
         )
+        attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
+        return self.o_proj(attn.transpose(1, 2).reshape(B, T, D))
+
+    def graph_generate(self, x: torch.Tensor, pos: torch.Tensor,
+                       mask: torch.Tensor) -> torch.Tensor:
+        """CUDA-graph / torch.compile friendly single-token gated-GQA decode."""
+        B, T, D = x.shape
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        kv = self.kv_proj(x).view(B, T, self.n_kv_heads, 2, self.head_dim)
+        k, v = kv.unbind(dim=3)
+        k, v = k.transpose(1, 2), v.transpose(1, 2)
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.pos_emb is not None:
+            q, k = self.pos_emb.rotate_at(q, k, pos)
+        self.kv_cache.k.index_copy_(2, pos, k)
+        self.kv_cache.v.index_copy_(2, pos, v)
+        k_full = self._expand_kv(self.kv_cache.k)
+        v_full = self._expand_kv(self.kv_cache.v)
+        attn = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask)
         attn = self._apply_gate(attn, x[..., :self.gate_input_dim])
         return self.o_proj(attn.transpose(1, 2).reshape(B, T, D))
 

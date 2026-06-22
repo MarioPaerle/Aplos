@@ -7,6 +7,7 @@ Everything built with Layer is totally compatible with torch native modules.
 
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Callable
 from Vathos.functions import *
 from timeit import default_timer as timer
@@ -1062,14 +1063,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x):
-        input_dtype = x.dtype
-
-        x_fp32 = x.to(torch.float32)
-        variance = x_fp32.pow(2).mean(dim=-1, keepdim=True)
-
-        x_rsqrt = torch.rsqrt(variance + self.eps)
-
-        return self.weight * (x_fp32 * x_rsqrt).to(input_dtype)
+        return F.rms_norm(x, (x.size(-1),), self.weight, self.eps)
 
 
 class EMA:

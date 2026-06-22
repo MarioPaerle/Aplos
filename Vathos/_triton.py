@@ -51,6 +51,24 @@ def _hopper_available() -> bool:
 if _HAS_TRITON:
 
     @triton.jit
+    def _selective_log_softmax_kernel(
+        logits_ptr, index_ptr, out_ptr,
+        N: tl.constexpr,
+        V: tl.constexpr,
+        BLOCK_V: tl.constexpr,
+    ):
+        """One program per row: out[row] = logits[row, index] - logsumexp(row)."""
+        row = tl.program_id(0)
+        offs = tl.arange(0, BLOCK_V)
+        mask = offs < V
+        vals = tl.load(logits_ptr + row * V + offs, mask=mask, other=-float("inf")).to(tl.float32)
+        max_val = tl.max(vals, axis=0)
+        lse = tl.log(tl.sum(tl.exp(vals - max_val), axis=0)) + max_val
+        target = tl.load(index_ptr + row)
+        chosen = tl.load(logits_ptr + row * V + target).to(tl.float32)
+        tl.store(out_ptr + row, chosen - lse)
+
+    @triton.jit
     def _linear_relu_square_kernel(
         a_desc, b_desc, c_desc, aux_desc,
         M, N, K,
@@ -294,6 +312,16 @@ def _can_use_triton_t4(x) -> bool:
     return x.dtype == torch.float16
 
 
+def _can_use_triton_ampere(x) -> bool:
+    """A100/Ampere path for the pointer-based fused LeakyReLU² kernel."""
+    if not (_HAS_TRITON and torch.cuda.is_available()):
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    if major != 8:
+        return False
+    return x.dtype in (torch.bfloat16, torch.float16)
+
+
 # =============================================================================
 # Host-side launchers (return both pre-activation and post-activation in fwd)
 # =============================================================================
@@ -406,6 +434,46 @@ def _can_use_triton_fused(x, M, N) -> bool:
     return (M % 128 == 0) and (N % 256 == 0)
 
 
+def triton_selective_log_softmax(logits: torch.Tensor,
+                                 index: torch.Tensor) -> torch.Tensor | None:
+    """Fused no-grad selective log-softmax.
+
+    Computes ``logits[..., index] - logsumexp(logits, dim=-1)`` without launching
+    separate reduction and gather kernels. This is intended for GRPO rollout
+    logging under ``torch.no_grad()``. It deliberately returns ``None`` when grad
+    is enabled so callers can keep the differentiable torch implementation for
+    policy/reference scoring.
+    """
+    if not (_HAS_TRITON and logits.is_cuda):
+        return None
+    if torch.is_grad_enabled() or logits.requires_grad:
+        return None
+    if logits.dim() < 2:
+        return None
+
+    V = logits.shape[-1]
+    if V <= 0 or V > 131072:
+        return None
+
+    logits_2d = logits.reshape(-1, V).contiguous()
+    index_1d = index.reshape(-1).contiguous()
+    if index_1d.numel() != logits_2d.shape[0]:
+        raise ValueError("index leading shape must match logits leading shape")
+
+    out = torch.empty((logits_2d.shape[0],), device=logits.device, dtype=torch.float32)
+    block_v = triton.next_power_of_2(V)
+    _selective_log_softmax_kernel[(logits_2d.shape[0],)](
+        logits_2d,
+        index_1d,
+        out,
+        N=logits_2d.shape[0],
+        V=V,
+        BLOCK_V=block_v,
+        num_warps=8,
+    )
+    return out.view(index.shape)
+
+
 # =============================================================================
 # VariableUDLP-compatible nn.Modules
 # =============================================================================
@@ -485,6 +553,27 @@ class TritonLReLU2UDLP_T4(_BaseTritonUDLP):
         return self.dropout(out)
 
 
+class TritonLReLU2UDLP_A100(_BaseTritonUDLP):
+    """LeakyReLU(0.5)² UDLP tuned for A100 / Ampere (sm_80).
+
+    Uses the pointer-based Triton kernel with arbitrary-shape masking, so it does
+    not need Hopper TMA. Supports fp16 and bf16. Falls back to the eager torch
+    path on non-Ampere GPUs or when Triton is missing.
+    """
+    _autograd_fn = _FusedLinearLReLU2_T4 if _HAS_TRITON else None
+    _eager_fn = staticmethod(_eager_lrelu2_mlp)
+    _name = "TritonLReLU2UDLP_A100"
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        W1 = self.expand.weight
+        W2 = self.contract.weight
+        if _can_use_triton_ampere(x):
+            out = self._autograd_fn.apply(x, W1, W2)
+        else:
+            out = self._eager_fn(x, W1, W2)
+        return self.dropout(out)
+
+
 # -----------------------------------------------------------------------------
 # SwiGLU — torch-only path (compile-friendly).
 #
@@ -525,6 +614,8 @@ class TritonSwiGLUUDLP(Layer):
 __all__ = [
     "TritonReLU2UDLP",
     "TritonLReLU2UDLP",
+    "TritonLReLU2UDLP_A100",
     "TritonLReLU2UDLP_T4",
     "TritonSwiGLUUDLP",
+    "triton_selective_log_softmax",
 ]

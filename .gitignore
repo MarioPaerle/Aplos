@@ -1,3 +1,16 @@
 .claude/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+checkpoints/
+bench_outputs/
+.runtime_cache/
+*.pt
+*.pth
+*.safetensors
+bench_*_*.out

@@ -4,15 +4,35 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aplos"
-version = "0.0.2"
-description = "Easy Research Level models"
+version = "0.1.0"
+description = "Production-oriented PyTorch model scaffolds and research blocks"
+requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.0",
+    "torch>=2.1",
     "numpy",
-    "matplotlib<=3.9",
     "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+plot = [
+    "matplotlib<=3.9",
+]
+triton = [
+    "triton>=3.2",
+]
+ui = [
     "dearpygui",
-    "streamlit"
+    "streamlit",
+    "matplotlib<=3.9",
+]
+full = [
+    "matplotlib<=3.9",
+    "triton>=3.2",
+    "dearpygui",
+    "streamlit",
 ]
 
 [tool.setuptools.packages.find]

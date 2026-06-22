@@ -489,6 +489,15 @@ def selective_log_softmax(logits: torch.Tensor, index: torch.Tensor) -> torch.Te
     Returns:
         ``[...]`` per-position log-probabilities (fp32).
     """
+    if logits.is_cuda and not torch.is_grad_enabled() and not logits.requires_grad:
+        try:
+            from Vathos._triton import triton_selective_log_softmax
+            fused = triton_selective_log_softmax(logits, index)
+            if fused is not None:
+                return fused
+        except (ImportError, RuntimeError):
+            pass
+
     logits = logits.float()
     lse = torch.logsumexp(logits, dim=-1)
     chosen = logits.gather(dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
