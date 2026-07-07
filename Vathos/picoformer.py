@@ -52,6 +52,7 @@ ChannelKind = Literal[
     "torch_relu2",
     "torch_lrelu2",
     "torch_leaky_reglu2",
+    "torch_swiglu",
     "triton_relu2",
     "triton_lrelu2",
     "triton_lrelu2_a100",
@@ -267,6 +268,11 @@ def _channel_builder(cfg: PiCOFormerConfig) -> Builder:
         return Builder(VariableUDLP, activation=LeakyReLU2, **common)
     if cfg.channel == "torch_leaky_reglu2":
         return Builder(VariableGLU, activation=LeakyReLU2, **common)
+    if cfg.channel == "torch_swiglu":
+        # SwiGLU con proiezioni SEPARATE (expand/up/contract) + SiLU — layout identico al FFN
+        # di training di Guido (`LeakyReGLU2_FFN(activation=nn.SiLU)`). Carica i checkpoint SwiGLU
+        # 1:1 senza fondere i pesi (a differenza di `triton_swiglu`, che fonde gate+up in 2*d_ff).
+        return Builder(VariableGLU, activation=torch.nn.SiLU, **common)
 
     from Vathos._triton import (
         TritonLReLU2UDLP,

@@ -3,7 +3,10 @@
 I checkpoint Guido (modello `train_guido_small.PiCOFormerLM`, allenato nel vecchio PiCO/aplos)
 caricano nel PiCOFormer di produzione di questo Aplos con:
   - attention 'gated_mha'  (= MultiheadGatedAttentionMixer, qkv fuso, gate per-head)
-  - channel  'torch_leaky_reglu2'  (= VariableGLU + LeakyReLU², il FFN di Guido)
+  - channel: dipende dal FFN del checkpoint —
+      'torch_leaky_reglu2' (VariableGLU + LeakyReLU²)  per i Guido con FFN LeakyReGLU²;
+      'torch_swiglu'       (VariableGLU + SiLU)         per i Guido SwiGLU (es. v5 / Guido-1-0.5B-Base).
+    (expand/up/contract sono uguali → distinguibili solo dall'attivazione: passa il channel giusto.)
   - rope_base 1e6
   - converter pesi = strip del prefisso 'backbone.'
 La config (d_model, n_layers, n_heads, d_ff, vocab, gate_input_dim, smear_gate) è AUTO-RILEVATA
