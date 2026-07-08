@@ -42,11 +42,16 @@ class RoPE(Layer):
     def _update_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device):
         if seq_len > self._seq_len_cached or self._cos_cached is None:
             self._seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=device, dtype=dtype)
-            freqs = torch.outer(t, self.inv_freq.to(device))
-
-            self._cos_cached = freqs.cos()
-            self._sin_cached = freqs.sin()
+            # RoPE tables MUST be built in fp32 and only then cast to the working dtype
+            # (mirrors prebuild()). Building t / inv_freq in bf16 quantizes integer positions
+            # past ~256 (and the frequencies), producing wrong rotation angles. That desynced
+            # this teacher-forced scorer forward from the fp32 compiled-decode path used by
+            # generate_grpo, corrupting GRPO logprobs (samax ~24 nats) and slowly decaying
+            # reward. Fix: fp32 build + cast-back. (RoPE-fp32 fix, 2026-07-08)
+            t = torch.arange(seq_len, device=device, dtype=torch.float32)
+            freqs = torch.outer(t, self.inv_freq.to(device).float())
+            self._cos_cached = freqs.cos().to(dtype)
+            self._sin_cached = freqs.sin().to(dtype)
 
     def _apply_rotary_emb(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                           start_pos: int = 0) -> torch.Tensor:
